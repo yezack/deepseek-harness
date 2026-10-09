@@ -12,11 +12,11 @@
 环境要求
   - UOS Desktop 20 (x86_64)，glibc 2.28 即可
   - root 权限（安装到 /dsh-uos 与 /var/tmp/dsh-node）
-  - 浏览器：现代 Chromium/Firefox 内核
+  - 浏览器：内核低于 Chrome 119 时由内置兼容层自动补齐（见下）
 
 安装
   tar xzf dsh-uos-offline.tar.gz
-  cd dsh-uos-offline
+  cd package
   sudo ./install.sh
   自定义安装位置：
     sudo DSH_DEST=/opt/dsh ./install.sh
@@ -27,6 +27,34 @@
     dsh web: http://127.0.0.1:3080/?token=XXXXXXXX
   用浏览器打开该完整地址（token 是鉴权凭据，必需）。
   默认只监听 127.0.0.1；关闭该窗口即停止服务。
+
+浏览器兼容层（dsh-host-web-compat）
+  服务端会在每个页面的 <head> 开头注入一段脚本，它是文档里的第一个
+  script，对老内核补齐以下能力，对已支持的内核什么都不做：
+
+    Promise.withResolvers   Chrome 119
+    AbortSignal.any         Chrome 116
+    Array.prototype.toSorted / toReversed / toSpliced / with
+    Array.fromAsync         Chrome 121
+    Object.groupBy / Map.groupBy
+    Set 的并/交/差等 7 个方法
+    Iterator 及其 map/filter/take/drop/flatMap/toArray 等 helper
+    color-mix()             Chrome 111（按 CSS Color 5 在运行时求值）
+
+  为什么必须这么做：页面尾部固定执行
+    (globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()
+  内核没有 Promise.withResolvers 时这个 Promise 永远不 settle，客户端插件树
+  不会启动，控制台报 "Promise.withResolvers is not a function"。
+  设计令牌里的 color-mix() 是第二个独立故障：内核不支持时整条声明失效，
+  而它的操作数几乎都是主题变量，构建期无法求值。
+
+  兼容层是幂等的，对现代浏览器只增加约 28KB 页面体积。
+
+自检：确认兼容层已注入
+  U=$(grep -oE 'http://127\.0\.0\.1:3080/[^ ]*' 启动日志 | head -1)
+  curl -sL "$U" | grep -c 'data-dsh-web-compat'      # 应为 1
+  若为 0，说明 web-app bundle 未挂载该行，检查 app 内是否存在
+  node_modules/@deepseek-ai/dsh-host-web-compat
 
 为什么需要写到 /var/tmp
   UOS 20 有自研的 deepin-elf-verify 服务（/etc/deepin-elf-verify/whitelist），
@@ -57,4 +85,8 @@
   start-web.sh                -> LISTEN 127.0.0.1:3080
   无 token 访问               -> 401
   带 token 访问               -> 303（换取 cookie 后进 SPA）
+  页面注入检查                -> data-dsh-web-compat 出现 1 次，
+                                 且是文档内第一个 <script>（偏移 57，
+                                 早于偏移 28838 的 head 注入行与
+                                 偏移 33284 的 parser-blocking bundle）
 ================================================================

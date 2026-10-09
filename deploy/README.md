@@ -155,6 +155,37 @@ SPA 主包 ./assets/index-5SrrfWpU.js -> 200，633282 字节
 
 自足性同时得到验证：`sha256` 与构建端一致，且解压前该镜像上不存在任何构建残留（`/dsh-uos`、`/var/tmp/dsh-node`、`/var/tmp/dsh-native-cache` 全部为安装脚本新建）。
 
+### 3.1 旧浏览器兼容层（dsh-host-web-compat）
+
+上面那轮验证只用了 curl，所以没有覆盖前端在旧内核上的失败。页面尾部固定执行 `(globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()`，内核没有 `Promise.withResolvers`（Chrome 119 才有）时这个 Promise 永不 settle，客户端插件树不启动，控制台报 `Promise.withResolvers is not a function`。设计令牌里的 `color-mix()`（Chrome 111 才有）是第二个独立故障：内核不支持时整条声明失效，而它的操作数几乎都是主题变量，构建期无法求值。
+
+`packages/host/web-compat` 提供这两层补丁。它用 `webServer.tapIndex` 把一段 classic script 插在 `<head>` 之后——用 tap 而不是 `webserver/index-inject` 行，是因为注入行按注册顺序渲染，而行无法保证排在别的插件之前，而 head 里的 bootstrap bundle 是 parser-blocking 的，必须更早。脚本幂等且自禁用：每个 polyfill 只在缺失时安装，`color-mix` 回退只在 `CSS.supports` 报不支持时运行。挂载点是 `packages/bundle/web-app/cordis.patch.yml` 的一行 `insert`，所以安装期不需要改 profile。
+
+验证分三层，都是在真实产物上做的：
+
+```
+JS  polyfill（Node 中先删除被测 API 再执行脚本）  -> 55/55
+Host 注入（插件接口 + 位置 + 内容 + 退化路径）    -> 18/18
+CSS  差分（浏览器先取引擎原生 color-mix 结果，
+      再强制走回退并比对，13 个探针覆盖 var() 令牌、
+      var() 链、自定义属性持有 mix、嵌套 mix、
+      border 简写、半透明操作数、省略百分比、
+      总和 >100% / <100% / =0）                    -> 13/13
+```
+
+CSS 那层用差分而不是断言固定色值：同一个探针先由引擎自己算一遍作为基准，再强制回退重算，两者数值相等才算通过。三个引擎行为只有这样才能发现——简写携带 `var()` 时是 pending-substitution value，长属性枚举读不到原文；计算色经过现代色彩函数后序列化为 `color(srgb …)` 而非 `rgb()`；嵌套 `color-mix` 的操作数必须先塌缩成字面量。
+
+部署后在真实页面上确认了注入位置（包版本 0.2.0-rc.2，UOS 20 全新安装）：
+
+```
+首页                        -> 200，63430 字节
+data-dsh-web-compat         -> 1 处，字节偏移 57
+该脚本是文档内第一个 <script>；下一个 <script> 在偏移 28838，
+parser-blocking 的 client-modules bundle 在 33284，
+boot 尾脚本在 63319
+页面体积增量 28584 字节 = 注入脚本大小
+```
+
 ---
 
 ## 四、让 DSH Web 可被其他机器访问（可选）
