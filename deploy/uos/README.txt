@@ -64,7 +64,10 @@
   `npx -y chrome-devtools-mcp@latest`（每次启动都要访问 registry）：
     - 服务端脚本取自安装目录
     - 浏览器默认 /usr/bin/browser（系统自带 Chromium）
-    - 以 headless + 临时 profile 运行，不触碰用户真实浏览器数据
+    - 以临时 profile 运行，不触碰用户真实浏览器数据
+    - 不使用 headless：UOS 的 deepin 浏览器 headless 必崩（trap int3），
+      只能跑在桌面会话里。MCP 因此会打开一个可见窗口，
+      start-web.sh 已导出 DISPLAY（默认 :0）
 
   可用环境变量覆盖，start-web.sh 已按实际安装目录导出：
     DSH_CHROME_PATH          浏览器可执行文件

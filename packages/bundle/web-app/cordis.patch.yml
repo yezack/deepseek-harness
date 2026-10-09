@@ -580,6 +580,12 @@
 # Chromium with a temporary profile, so the server never touches the user's real
 # browser state, and the launcher exports both paths — a non-default install
 # directory therefore needs no edit here.
+#
+# No `--headless`: the deepin browser build on UOS 20 aborts on every headless
+# variant (`trap int3`, Chromium CHECK failure), while the same binary runs and
+# serves CDP normally against the desktop session. The launcher therefore
+# exports DISPLAY and the browser opens a visible window, which is also what an
+# operator watching an automated session wants.
 - insert:
     - id: mcp-chrome-devtools
       name: '@deepseek-ai/dsh-mcp-client'
@@ -591,5 +597,4 @@
           - !!js "process.env.DSH_CHROME_DEVTOOLS_MCP ?? '/deepseek-harness/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js'"
           - '--executablePath'
           - !!js "process.env.DSH_CHROME_PATH ?? '/usr/bin/browser'"
-          - '--headless'
           - '--isolated'
