@@ -573,3 +573,23 @@
 - insert:
     - id: web-compat
       name: '@deepseek-ai/dsh-host-web-compat'
+
+# chrome-devtools MCP served from the installation rather than the usual
+# `npx -y chrome-devtools-mcp@latest`, which reaches a registry on every start
+# and cannot run on a host with no network. The browser is the platform's own
+# Chromium with a temporary profile, so the server never touches the user's real
+# browser state, and the launcher exports both paths — a non-default install
+# directory therefore needs no edit here.
+- insert:
+    - id: mcp-chrome-devtools
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: chrome-devtools
+        transport: stdio
+        command: node
+        args:
+          - !!js "process.env.DSH_CHROME_DEVTOOLS_MCP ?? '/deepseek-harness/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js'"
+          - '--executablePath'
+          - !!js "process.env.DSH_CHROME_PATH ?? '/usr/bin/browser'"
+          - '--headless'
+          - '--isolated'

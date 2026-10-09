@@ -50,6 +50,32 @@
 
   兼容层是幂等的，对现代浏览器只增加约 28KB 页面体积。
 
+预装插件与 chrome-devtools MCP
+  离线包已内置以下三个插件，首次启动即生效，无需联网安装：
+
+    dsh-capability-panel            1.4.0     能力面板
+    @michengai/dsh-archive-manager  1.0.15    压缩包管理
+    @lemoncat7/dsh-ssh              1.11.1    SSH 连接
+
+  它们被写进 web profile 的 bundle 模板，包体在 app/node_modules 里，
+  因此目标机不需要 npm registry。某个包缺失时 DSH 会跳过并记录，不会启动失败。
+
+  chrome-devtools MCP 同样内置（chrome-devtools-mcp 1.10.1）。它不再使用
+  `npx -y chrome-devtools-mcp@latest`（每次启动都要访问 registry）：
+    - 服务端脚本取自安装目录
+    - 浏览器默认 /usr/bin/browser（系统自带 Chromium）
+    - 以 headless + 临时 profile 运行，不触碰用户真实浏览器数据
+
+  可用环境变量覆盖，start-web.sh 已按实际安装目录导出：
+    DSH_CHROME_PATH          浏览器可执行文件
+    DSH_CHROME_DEVTOOLS_MCP  MCP 服务端脚本
+
+  这三个 bundle 由 seed-profile.sh 在每次启动前就位。原因：Loader 是从 profile
+  目录用原生 Node 解析导入 bundle 条目的（不是从安装目录），profile 下没有
+  node_modules 时插件会被静默停用，只在启动日志里留一行
+  "N entries did not activate"。脚本幂等，已存在的 manifest 只补 dependencies，
+  不会覆盖你自己的 profile 配置。
+
 自检：确认兼容层已注入
   U=$(grep -oE 'http://127\.0\.0\.1:3080/[^ ]*' 启动日志 | head -1)
   curl -sL "$U" | grep -c 'data-dsh-web-compat'      # 应为 1
@@ -70,6 +96,7 @@
 安装后的目录
   /deepseek-harness/app                    应用与全部依赖（1.3GB）
   /deepseek-harness/start-web.sh           启动脚本
+  /deepseek-harness/seed-profile.sh        预置 web profile（启动脚本调用）
   /deepseek-harness/uninstall.sh           卸载脚本
   /var/tmp/dsh-node/              Node 运行时（白名单路径）
   /var/tmp/dsh-native-cache/      原生模块缓存（白名单路径）

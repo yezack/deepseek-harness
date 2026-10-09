@@ -181,7 +181,18 @@ export const PROFILE_TEMPLATES: Record<string, ProfileTemplate> = {
     bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-acp-app'],
   },
   web: {
-    bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'],
+    // The three third-party bundles are part of this installation's offline
+    // image: the app ships them in its own `node_modules` and the offline
+    // installer has no registry to add them from later. A host without them
+    // skips them, because an unresolvable bundle is recorded and dropped rather
+    // than fatal.
+    bundles: [
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-web-app',
+      'dsh-capability-panel',
+      '@michengai/dsh-archive-manager',
+      '@lemoncat7/dsh-ssh',
+    ],
   },
   headless: {
     bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'],

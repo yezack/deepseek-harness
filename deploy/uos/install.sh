@@ -55,6 +55,22 @@ if [ -d "$KOROMIX_SRC" ]; then
   echo "      koffi 原生模块已链接到白名单路径"
 fi
 
+# chrome-devtools MCP 需要一个浏览器；只报告不阻断，其余功能不依赖它。
+CHROME_BIN="${DSH_CHROME_PATH:-/usr/bin/browser}"
+if [ -x "$CHROME_BIN" ]; then
+  echo "      chrome-devtools 浏览器: $CHROME_BIN ($("$CHROME_BIN" --version 2>/dev/null | head -1))"
+else
+  echo "      [警告] $CHROME_BIN 不存在，chrome-devtools MCP 无法启动浏览器"
+fi
+
+# 预置脚本随包发布，由 start-web.sh 每次启动前调用（幂等）。
+if [ ! -f "$HERE/seed-profile.sh" ]; then
+  echo "[错误] 缺少 $HERE/seed-profile.sh"
+  exit 1
+fi
+cp "$HERE/seed-profile.sh" "$DEST/seed-profile.sh"
+chmod +x "$DEST/seed-profile.sh"
+
 # 生成启动脚本
 cat > "$DEST/start-web.sh" <<LAUNCH
 #!/bin/bash
@@ -62,7 +78,15 @@ DEST="$DEST"
 export DSH_HOME="\${DSH_HOME:-\$HOME/.dsh}"
 export PATH="$INSTALL_NODE_DIR/bin:\$PATH"
 export NARB_NATIVE_CACHE_DIR=/var/tmp/dsh-native-cache
+# chrome-devtools MCP: the copy inside the installation, launched by this node,
+# driving the platform's own Chromium. Exported rather than written into the
+# profile so a non-default DSH_DEST needs no further edit.
+export DSH_CHROME_DEVTOOLS_MCP="$DEST/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+export DSH_CHROME_PATH="\${DSH_CHROME_PATH:-/usr/bin/browser}"
 mkdir -p "\$DSH_HOME" /var/tmp/dsh-native-cache 2>/dev/null
+# 预装 bundle 必须在 DSH 首次创建 profile 之前就位，否则 Loader 从 profile
+# 目录解析不到它们，只会记一条 "failed to import" 并静默停用插件。
+SEED_NODE="$INSTALL_NODE_DIR/bin/node" "$DEST/seed-profile.sh" "$DEST"
 cd "\$DEST"
 echo "============================================"
 echo "  DeepSeek Harness - Web 服务"
