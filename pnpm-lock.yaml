@@ -2624,6 +2624,9 @@ importers:
       '@deepseek-ai/dsh-host-product-telemetry-otel':
         specifier: workspace:*
         version: link:../../host/product-telemetry-otel
+      '@deepseek-ai/dsh-host-web-compat':
+        specifier: workspace:*
+        version: link:../../host/web-compat
       '@deepseek-ai/dsh-host-webserver':
         specifier: workspace:*
         version: link:../../host/webserver
@@ -9189,6 +9192,17 @@ importers:
         specifier: workspace:*
         version: link:../../telemetry/otel
 
+  packages/host/web-compat:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:~
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/cordis-plugin-loader':
+        specifier: workspace:~
+        version: link:../../../vendor/loader
+      '@deepseek-ai/dsh-host-webserver':
+        specifier: workspace:*
+        version: link:../webserver
   packages/host/webserver:
     dependencies:
       '@deepseek-ai/schemastery':

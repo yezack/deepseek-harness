@@ -563,3 +563,13 @@
       name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
         default: standard
+
+# Legacy-browser compatibility for the served page. The row is unconditional
+# because the injected script self-detects: every polyfill installs only where
+# the kernel lacks the API, and the color-mix() pass returns immediately where
+# the engine supports the function, so a current browser pays only the bytes.
+# A deployment that wants it gone overrides this row to `disabled: true` in a
+# later patch layer.
+- insert:
+    - id: web-compat
+      name: '@deepseek-ai/dsh-host-web-compat'
