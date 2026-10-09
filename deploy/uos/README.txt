@@ -28,6 +28,10 @@
   用浏览器打开该完整地址（token 是鉴权凭据，必需）。
   默认只监听 127.0.0.1；关闭该窗口即停止服务。
 
+  必须以桌面登录用户运行，不要用 sudo。安装需要 root，但启动不需要：
+  Chrome 拒绝以 root 启动，root 也拿不到桌面会话的 X 授权，
+  chrome-devtools MCP 会因此报 "Chrome failed to start"。
+
 浏览器兼容层（dsh-host-web-compat）
   服务端会在每个页面的 <head> 开头注入一段脚本，它是文档里的第一个
   script，对老内核补齐以下能力，对已支持的内核什么都不做：

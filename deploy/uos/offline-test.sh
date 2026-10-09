@@ -51,12 +51,19 @@ else
 fi
 
 echo "=== 5. chrome-devtools MCP 冒烟（stdio 直连，含真实开页）==="
+# Chrome 拒绝以 root 启动，root 也拿不到桌面会话的 X 授权，所以以 root 跑这个
+# 测试时浏览器必然起不来。真实部署里 start-web.sh 由用户自己运行，因此这里在
+# root 下改用 SUDO_USER 复现真实身份，否则测试会报出与产品无关的失败。
+RUN_AS=""
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  RUN_AS="$SUDO_USER"
+fi
 NODE_BIN="$(command -v node)"
 [ -x "$NODE_BIN" ] || NODE_BIN=/var/tmp/dsh-node/bin/node
 MCP="$DEST/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
 echo "  node: $NODE_BIN"
 echo "  mcp : $MCP"
-echo "  浏览器: ${DSH_CHROME_PATH:-/usr/bin/browser}  DISPLAY=${DISPLAY:-:0}"
+echo "  运行身份: ${RUN_AS:-当前用户}   浏览器: ${DSH_CHROME_PATH:-/usr/bin/browser}   DISPLAY=${DISPLAY:-:0}"
 if [ -f "$MCP" ]; then
   # 保持 stdin 打开，否则服务端在请求处理完前就随 EOF 退出。
   { printf '%s\n' \
@@ -67,16 +74,27 @@ if [ -f "$MCP" ]; then
     sleep 4
     printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"new_page","arguments":{"url":"about:blank"}}}'
     sleep 60
-  } | DISPLAY="${DISPLAY:-:0}" timeout 150 "$NODE_BIN" "$MCP" \
-        --executablePath "${DSH_CHROME_PATH:-/usr/bin/browser}" --isolated \
-        > /tmp/mcp-out.json 2>/tmp/mcp-err.txt
+  } > /tmp/mcp-in.jsonl
+  if [ -n "$RUN_AS" ]; then
+    chmod 644 /tmp/mcp-in.jsonl
+    sudo -n -u "$RUN_AS" env "DISPLAY=${DISPLAY:-:0}" "XAUTHORITY=$(getent passwd "$RUN_AS" | cut -d: -f6)/.Xauthority" \
+      "PATH=$(dirname "$NODE_BIN"):/usr/bin:/bin" \
+      timeout 150 "$NODE_BIN" "$MCP" --executablePath "${DSH_CHROME_PATH:-/usr/bin/browser}" --isolated \
+      < /tmp/mcp-in.jsonl > /tmp/mcp-out.json 2>/tmp/mcp-err.txt
+  else
+    timeout 150 "$NODE_BIN" "$MCP" --executablePath "${DSH_CHROME_PATH:-/usr/bin/browser}" --isolated \
+      < /tmp/mcp-in.jsonl > /tmp/mcp-out.json 2>/tmp/mcp-err.txt
+  fi
   echo "  退出码=$?"
   echo "  工具数: $(grep -o '"name":"[a-z_]*"' /tmp/mcp-out.json | sort -u | wc -l)"
   echo "  工具样例:"; grep -o '"name":"[a-z_]*"' /tmp/mcp-out.json | sort -u | head -5 | sed 's/^/    /'
-  echo "  真实开页(new_page)结果:"
-  grep -o '"id":3[^}]*' /tmp/mcp-out.json | head -c 300 | sed 's/^/    /'
-  echo
-  grep -o 'isError":true' /tmp/mcp-out.json | head -1 | sed 's/^/    /'
+  echo "  真实开页(new_page):"
+  if grep -aq 'isError":true' /tmp/mcp-out.json; then
+    echo "    ✗ 失败:"; grep -ao '"text":"[^"]*' /tmp/mcp-out.json | tail -1 | head -c 300 | sed 's/^/      /'
+    echo
+  else
+    echo "    ✓ $(grep -oa '"text":"## Pages[^"]*' /tmp/mcp-out.json | head -1)"
+  fi
 else
   echo "  ✗ 未找到 MCP 脚本"
 fi
