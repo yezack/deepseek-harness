@@ -8,12 +8,14 @@
 
 ## 交付物
 
-| 平台 | 文件 | 大小 | sha256 |
-|---|---|---|---|
-| Windows 7 (x64) | `dsh-win7-offline.zip` | 688 MB | `23161641b36b58b12e7d045a4f0b9ab09310cd8b18eaab13a86a7493d0da0043` |
-| UOS 20 (x86_64) | `dsh-uos-offline.tar.gz` | 450 MB | `83a6ab76869b1d675d04750c13ed7ad95d548272bbf4978ed85486057e4b0bc4` |
+| 平台 | 文件 | dsh 版本 | 大小 | sha256 |
+|---|---|---|---|---|
+| Windows 7 (x64) | `dsh-win7-offline.zip` | 0.1.7-rc.1 | 688 MB | `23161641b36b58b12e7d045a4f0b9ab09310cd8b18eaab13a86a7493d0da0043` |
+| UOS 20 (x86_64) | `dsh-uos-offline-0.2.0-rc.2.tar.gz` | 0.2.0-rc.2 | 558 MB | `e3efd7b71d3767c7e8c22066d891810d884533d9e2d1bd6079e0816cd5d036e4` |
 
-包内统一包含：`dsh 0.2.0-rc.2` + `Node.js 22.23.2` + 全部依赖树（约 1.3–1.4 GB 解压后）+ 安装/启动/卸载脚本 + 说明。
+包内统一包含：对应版本的 `dsh` + `Node.js 22.23.2` + 全部依赖树（约 1.3–1.5 GB 解压后）+ 安装/启动/卸载脚本 + 说明。
+
+> Windows 7 包目前仍是 0.1.7-rc.1；VxKex 方案与版本无关，但需要用 0.2.0-rc.2 的源码重新走一遍打包流程才能在 Win7 上升级。
 
 ---
 
@@ -149,12 +151,30 @@ deepin-elf-verify.service   (ExecStart=/usr/sbin/deepin-elf-verify)
 
 此外，「`EACCES: mkdir .../home/profiles/web`」是因为安装脚本以 root 运行、`DSH_HOME` 落在 root 属主目录 —— 已把 `DSH_HOME` 默认改为用户可写的 `~/.dsh`。
 
-### 3.3 构建期的两个坑（对重新打包有用）
+### 3.3 构建期的坑（对重新打包有用）
+
+**物化依赖树时**
 
 | 问题 | 根因 | 解法 |
 |---|---|---|
 | `koffi` 源码编译失败 | 它硬编码 `-march=x86-64-v2`（`cnoke.cjs:320`），需要 **GCC 11+**，而 UOS 20 自带 GCC 8.3 | 改用**官方预编译包** `@koromix/koffi-linux-x64`，完全不编译 |
-| npm 崩溃 `Cannot read properties of null (reading 'edgesOut')` | 318 个 `file:` 依赖触发 npm/arborist 缺陷（`build-ideal-tree.js:1289` 的 `#loadPeerSet` 缺 null 检查） | 用 `--legacy-peer-deps --ignore-scripts` 安装 |
+| npm 崩溃 `Cannot read properties of null (reading 'edgesOut')` | 大量 `file:` 依赖触发 npm/arborist 缺陷（`build-ideal-tree.js:1289` 的 `#loadPeerSet` 对 `node.parent` 缺 null 检查） | 用 `--legacy-peer-deps --ignore-scripts` 安装 |
+| `npm` 报 `/usr/bin/env: "node": 没有那个文件或目录` | `node_modules/.bin/npm` 是 `#!/usr/bin/env node` 脚本，依赖 PATH 解析 | 直接用 `node <node>/lib/node_modules/npm/bin/npm-cli.js` 调用 |
+| npm 报 `ENOENT ... uv_cwd` | 当前工作目录已被删除，`process.cwd()` 失败 | 运行前先 `cd` 到确实存在的目录 |
+
+**编译源码时（0.2.0-rc.2 新增）**
+
+| 问题 | 根因 | 解法 |
+|---|---|---|
+| `tsc` 报 `micromark-util-types` 出现 2.0.2 与 2.0.3 两个版本导致类型冲突 | 用 `pnpm install`（非 frozen）会**改写 `pnpm-lock.yaml`**，使依赖解析漂移 | 必须用 `pnpm install --frozen-lockfile` |
+| 清干净锁文件后 `tsc -b` 仍报同类冲突 | 旧版本遗留的 362 个 `.tsbuildinfo` 与 314 个 `lib/` 让增量编译拿着旧声明文件比对 | 先 `pnpm run clean` 再 `build:official` |
+
+另外两点：
+
+- **`pnpm install` 的自我 rename 冲突**：仓库把 `pnpm` 自己也列在 `devDependencies`，某些组合下会报 `ERR_PNPM_EPERM: rename '...pnpm_tmp_*' -> '...pnpm'`。用 `packageManager` 指定的 **11.7.0** 版本（`corepack prepare pnpm@11.7.0 --activate`）可正常安装；若仍失败，临时从 `devDependencies` 移除该声明（**不要提交这个改动**）。
+- **不要用 `pnpm run build` 产打包用的构建记录**，用 `build:official`；随后 `release:pack` 会校验构建产物。
+
+> `--patch` 之后 `--trusted-host` 之类的应用参数位置也很关键，见第五节。
 
 ### 3.4 用法
 
@@ -184,37 +204,62 @@ dsh web: http://127.0.0.1:3080/?token=XXXXXXXX
 
 > `/var/tmp` 可能被系统清理。若 node 丢失，重新执行 `sudo ./install.sh` 即可。
 
+### 3.6 为什么不能打包成单文件 AppImage
+
+AppImage 在这里**做得出但跑不起来**，原因是上面的白名单机制：
+
+| 层 | 事实 | 结论 |
+|---|---|---|
+| 运行时依赖 | `libfuse2` 已安装（`/lib/x86_64-linux-gnu/libfuse.so.2`），`/dev/fuse` 存在 | 具备 |
+| 打包工具 | `appimagetool` 未安装 | 可补 |
+| **执行路径** | AppImage 把 squashfs 挂载到 `/tmp/.mount_<名>/`，其中的 `node` 二进制就从该路径执行 | **被白名单拦截** |
+
+白名单共 31 条，含 `/tmp` 的只有三条特定路径（`/tmp/.org.chromium.Chromium`、`/tmp/mono-bundle-`、`/tmp/.abcwltcodec`），**没有 `/tmp` 的通配规则**。实测同一个原生模块文件：
+
+```
+/var/tmp/p.node  -> OK
+/tmp/p.node      -> failed to map segment from shared object
+```
+
+`--appimage-extract-and-run` 同样解压到 `/tmp`，无法规避。此外 AppImage 文件自身也要放在 `/var/tmp` 才能被执行。
+
+**单文件可执行的可行替代**：自解压安装器（makeself 风格）——一个 `.run` 文件内含 `tar.gz`，运行时解压到 `/var/tmp` 与安装目录再启动。执行路径落在白名单内，因此可用。本质是当前 tar.gz 去掉手动解压那一步。
+
 ---
 
 ## 四、验证结果
 
 两个平台都在**还原后的干净虚拟机**上做过端到端验证。
 
-**Windows 7 SP1 x64**
+**Windows 7 SP1 x64**（包版本 0.1.7-rc.1）
 
 ```
 install.cmd            -> INSTALL_EXITCODE=0 / [OK] Setup complete
 node.exe -v            -> v22.23.2
-dsh --version          -> 0.2.0-rc.2
+dsh --version          -> 0.1.7-rc.1
 dsh web                -> LISTENING 127.0.0.1:3080
 IFEO 校验              -> FilterFullPath=<安装路径>\node\node.exe
                           VerifierDlls=kexdll.dll  GlobalFlag=0x100
 自定义路径 C:\MYDSH    -> 同样通过（FilterFullPath 自动跟随）
 ```
 
-**UOS 20 Professional (x86_64, glibc 2.28)**
+**UOS 20 Professional (x86_64, glibc 2.28)**（包版本 0.2.0-rc.2，在还原后的干净镜像上验证）
 
 ```
-install.sh             -> 安装完成（约 9 秒）
-node -v                -> v22.23.2
-dsh --version          -> 0.2.0-rc.2
-koffi 原生模块         -> KOFFI_OK
+install.sh                 -> 安装完成
+node -v                    -> v22.23.2
+dsh --version              -> 0.2.0-rc.2
+koffi 原生模块             -> KOFFI_OK function
 node-addon-require-builtin -> NARB_OK
-start-web.sh           -> LISTEN 127.0.0.1:3080
-无 token 访问          -> 401
-带 token 访问          -> 303（换 cookie 后进入 SPA）
-SPA 资源               -> 正常加载
+start-web.sh               -> LISTEN 127.0.0.1:3080
+无 token 访问              -> 401
+带 token 访问              -> 303（换 cookie 后进入 SPA）
+首页                       -> 200，34846 字节
+SPA 主包 ./assets/index-5SrrfWpU.js -> 200，633282 字节
+/api/session/list          -> 200
 ```
+
+自足性同时得到验证：`sha256` 与构建端一致，且解压前该镜像上不存在任何构建残留（`/dsh-uos`、`/var/tmp/dsh-node`、`/var/tmp/dsh-native-cache` 全部为安装脚本新建）。
 
 ---
 
