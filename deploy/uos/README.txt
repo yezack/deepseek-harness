@@ -11,7 +11,7 @@
 
 环境要求
   - UOS Desktop 20 (x86_64)，glibc 2.28 即可
-  - root 权限（安装到 /dsh-uos 与 /var/tmp/dsh-node）
+  - root 权限（安装到 /deepseek-harness 与 /var/tmp/dsh-node）
   - 浏览器：内核低于 Chrome 119 时由内置兼容层自动补齐（见下）
 
 安装
@@ -22,7 +22,7 @@
     sudo DSH_DEST=/opt/dsh ./install.sh
 
 启动
-  /dsh-uos/start-web.sh
+  /deepseek-harness/start-web.sh
   它会在控制台打印一行带 token 的地址，例如：
     dsh web: http://127.0.0.1:3080/?token=XXXXXXXX
   用浏览器打开该完整地址（token 是鉴权凭据，必需）。
@@ -68,15 +68,15 @@
   注意 /var/tmp 可能被系统清理；若 node 丢失，重新执行 sudo ./install.sh 即可。
 
 安装后的目录
-  /dsh-uos/app                    应用与全部依赖（1.3GB）
-  /dsh-uos/start-web.sh           启动脚本
-  /dsh-uos/uninstall.sh           卸载脚本
+  /deepseek-harness/app                    应用与全部依赖（1.3GB）
+  /deepseek-harness/start-web.sh           启动脚本
+  /deepseek-harness/uninstall.sh           卸载脚本
   /var/tmp/dsh-node/              Node 运行时（白名单路径）
   /var/tmp/dsh-native-cache/      原生模块缓存（白名单路径）
   ~/.dsh/                         DSH_HOME（会话与设置）
 
 卸载
-  /dsh-uos/uninstall.sh
+  /deepseek-harness/uninstall.sh
 
 已实测（UOS Desktop 20 Professional / glibc 2.28 / x86_64）
   install.sh                  -> 安装完成

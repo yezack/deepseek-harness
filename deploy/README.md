@@ -90,7 +90,7 @@ deepin-elf-verify.service   (ExecStart=/usr/sbin/deepin-elf-verify)
 tar xzf dsh-uos-offline-0.2.0-rc.2.tar.gz
 cd package
 sudo ./install.sh                      # 可 DSH_DEST=/opt/dsh 自定义位置
-/dsh-uos/start-web.sh                  # 普通用户运行
+/deepseek-harness/start-web.sh                  # 普通用户运行
 ```
 
 启动脚本会打印带 token 的地址，例如：
@@ -102,9 +102,9 @@ dsh web: http://127.0.0.1:3080/?token=XXXXXXXX
 ### 2.5 安装后的目录
 
 ```
-/dsh-uos/app                   应用与全部依赖
-/dsh-uos/start-web.sh          启动脚本
-/dsh-uos/uninstall.sh          卸载脚本
+/deepseek-harness/app                   应用与全部依赖
+/deepseek-harness/start-web.sh          启动脚本
+/deepseek-harness/uninstall.sh          卸载脚本
 /var/tmp/dsh-node/             Node 运行时（白名单路径）
 /var/tmp/dsh-native-cache/     原生模块缓存 + koffi（白名单路径）
 ~/.dsh/                        DSH_HOME
@@ -153,7 +153,7 @@ SPA 主包 ./assets/index-5SrrfWpU.js -> 200，633282 字节
 /api/session/list          -> 200
 ```
 
-自足性同时得到验证：`sha256` 与构建端一致，且解压前该镜像上不存在任何构建残留（`/dsh-uos`、`/var/tmp/dsh-node`、`/var/tmp/dsh-native-cache` 全部为安装脚本新建）。
+自足性同时得到验证：`sha256` 与构建端一致，且解压前该镜像上不存在任何构建残留（`/deepseek-harness`、`/var/tmp/dsh-node`、`/var/tmp/dsh-native-cache` 全部为安装脚本新建）。
 
 ### 3.1 旧浏览器兼容层（dsh-host-web-compat）
 

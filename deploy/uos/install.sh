@@ -2,7 +2,7 @@
 # DeepSeek Harness - UOS 离线安装
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
-DEST="${DSH_DEST:-/dsh-uos}"
+DEST="${DSH_DEST:-/deepseek-harness}"
 INSTALL_NODE_DIR="/var/tmp/dsh-node"
 
 echo "============================================"
