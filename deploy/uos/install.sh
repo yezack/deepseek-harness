@@ -69,7 +69,10 @@ if [ ! -f "$HERE/seed-profile.sh" ]; then
   exit 1
 fi
 cp "$HERE/seed-profile.sh" "$DEST/seed-profile.sh"
-chmod +x "$DEST/seed-profile.sh"
+# 用绝对模式，不用 chmod +x：从 Windows 经 SFTP 带过来的文件可能是 711，
+# +x 不会补上组/其他的读位，而 bash 解析脚本需要读权限 —— 结果是启动时
+# 静默失败、插件全部停用。
+chmod 755 "$DEST/seed-profile.sh"
 
 # 生成启动脚本
 cat > "$DEST/start-web.sh" <<LAUNCH

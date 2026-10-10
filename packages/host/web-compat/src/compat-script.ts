@@ -453,7 +453,16 @@ const COMPAT_SCRIPT_SOURCE = String.raw`(function () {
     var probe = null
     var originals = new g.Map()
     var rewriting = false
-    var scheduled = false
+    var frameQueued = false
+    var fullPassQueued = false
+    /* Valid for one pass. A theme change re-resolves the same tokens many times
+    over, and every probe read forces a style recalculation, so both caches are
+    cleared at the start of a pass and reused within it. */
+    var tokenCache = new g.Map()
+    var rgbaCache = new g.Map()
+    /** Read from the page console to see how often the pass actually runs. */
+    var stats = { passes: 0, sheets: 0, rewritten: 0, lastPassMs: 0 }
+    g.__DSH_WEB_COMPAT_STATS__ = stats
 
     function ensureProbe() {
       if (probe !== null && probe.isConnected) return probe
@@ -473,8 +482,11 @@ const COMPAT_SCRIPT_SOURCE = String.raw`(function () {
     /* Custom properties compute with their var() references already
     substituted, so one lookup resolves a token to a concrete color. */
     function lookupCustomProperty(name) {
+      if (tokenCache.has(name)) return tokenCache.get(name)
       var value = computed().getPropertyValue(name)
-      return value === null ? '' : value.trim()
+      var resolved = value === null ? '' : value.trim()
+      tokenCache.set(name, resolved)
+      return resolved
     }
 
     function splitTopLevel(text, separator) {
@@ -544,7 +556,7 @@ const COMPAT_SCRIPT_SOURCE = String.raw`(function () {
     covered. Its serialization is rgb()/rgba() for legacy syntax and
     color(srgb ...) when the value came through a modern color function, so
     both forms are read back here. */
-    function toRgba(color) {
+    function parseRgba(color) {
       var element = ensureProbe()
       if (element === null) return null
       element.style.color = ''
@@ -568,6 +580,16 @@ const COMPAT_SCRIPT_SOURCE = String.raw`(function () {
         return text.indexOf('%') === -1 ? parseFloat(text) * 255 : parseFloat(text) * 2.55
       }
       return { r: channel(wide[1]), g: channel(wide[2]), b: channel(wide[3]), a: parseAlpha(wide[4]) }
+    }
+
+    /* Each miss writes the probe and reads it back, which forces a style
+    recalculation. The design tokens reuse a few dozen colors across hundreds of
+    declarations, so one pass resolves each distinct color once. */
+    function toRgba(color) {
+      if (rgbaCache.has(color)) return rgbaCache.get(color)
+      var parsed = parseRgba(color)
+      rgbaCache.set(color, parsed)
+      return parsed
     }
 
     function parseStop(text) {
@@ -693,7 +715,9 @@ const COMPAT_SCRIPT_SOURCE = String.raw`(function () {
         changed = true
         out.push(name + ': ' + resolved.trim())
       }
-      return changed ? out.join('; ') : null
+      if (!changed) return null
+      stats.rewritten += 1
+      return out.join('; ')
     }
 
     function rewriteRule(rule) {
@@ -733,40 +757,67 @@ const COMPAT_SCRIPT_SOURCE = String.raw`(function () {
       if (rewriting) return
       if (ensureProbe() === null) return
       rewriting = true
+      tokenCache.clear()
+      rgbaCache.clear()
+      stats.rewritten = 0
+      var startedAt = g.performance !== undefined && g.performance.now !== undefined ? g.performance.now() : 0
       try {
         var sheets = document.styleSheets
         for (var i = 0; i < sheets.length; i += 1) rewriteStyleSheet(sheets[i])
       } finally {
         rewriting = false
       }
+      stats.passes += 1
+      stats.sheets = document.styleSheets.length
+      if (startedAt !== 0) stats.lastPassMs = Math.round((g.performance.now() - startedAt) * 10) / 10
     }
 
-    function schedule() {
-      if (scheduled) return
-      scheduled = true
-      var run = function () { scheduled = false; rewriteAll() }
+    function queueFrame() {
+      if (frameQueued) return
+      frameQueued = true
+      var run = function () {
+        frameQueued = false
+        if (!fullPassQueued) return
+        fullPassQueued = false
+        rewriteAll()
+      }
       if (typeof g.requestAnimationFrame === 'function') g.requestAnimationFrame(run)
       else setTimeout(run, 0)
     }
 
+    /**
+     * A pass re-resolves every color-mix in the document and each resolution
+     * reads the probe, which forces a style recalculation. Running that on every
+     * mutation is what made the shell stutter: a React surface rewrites the class
+     * attribute continuously, so the observer fired on nearly every frame, the
+     * pass redid the whole document, and the identical result was discarded.
+     *
+     * Only two things can change a resolved color, so only they schedule a pass:
+     * a theme attribute, and a newly inserted stylesheet. The class and style
+     * attributes stay out of the filter — they change constantly and carry no
+     * theme. Everything coalesces into one frame, so a burst of inserted sheets
+     * still costs a single pass.
+     */
     function start() {
       rewriteAll()
       var observer = new g.MutationObserver(function (records) {
         for (var i = 0; i < records.length; i += 1) {
           var record = records[i]
-          if (record.type === 'attributes') { schedule(); return }
+          if (record.type === 'attributes') { fullPassQueued = true; break }
           for (var j = 0; j < record.addedNodes.length; j += 1) {
             var node = record.addedNodes[j]
             if (node.nodeType !== 1) continue
-            if (node.nodeName === 'STYLE' || node.nodeName === 'LINK') { schedule(); return }
+            if (node.nodeName === 'STYLE' || node.nodeName === 'LINK') { fullPassQueued = true; break }
           }
+          if (fullPassQueued) break
         }
+        if (fullPassQueued) queueFrame()
       })
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['data-ds-dark-theme', 'class', 'data-theme', 'style'],
+        attributeFilter: ['data-ds-dark-theme', 'data-ds-theme-source', 'data-theme'],
       })
     }
 
