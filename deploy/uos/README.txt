@@ -55,12 +55,13 @@
   兼容层是幂等的，对现代浏览器只增加约 28KB 页面体积。
 
 预装插件与 chrome-devtools MCP
-  离线包已内置以下五个插件，首次启动即生效，无需联网安装：
+  离线包已内置以下六个插件，首次启动即生效，无需联网安装：
 
     dsh-capability-panel            1.4.0     能力面板
     @michengai/dsh-archive-manager  1.0.15    压缩包管理
     @lemoncat7/dsh-ssh              1.11.1    SSH 连接
     dsh-remote-mobile               1.9.0     远程与移动端接入（扫码配对）
+    dsh-rewind-plugin               0.15.1    会话回退
     dshmarket                       1.66.11   插件管理（启停 / 配置）
 
   dshmarket 的离线边界：**插件的启停、配置、profile 编辑读的是本地状态，

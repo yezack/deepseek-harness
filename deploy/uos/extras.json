@@ -4,6 +4,7 @@
   { "name": "@lemoncat7/dsh-ssh", "version": "1.11.1" },
   { "name": "dshmarket", "version": "1.66.11" },
   { "name": "dsh-remote-mobile", "version": "1.9.0" },
+  { "name": "dsh-rewind-plugin", "version": "0.15.1" },
   {
     "name": "@yezack/chrome-devtools-mcp-108",
     "spec": "file:extras/yezack-chrome-devtools-mcp-108-1.10.1.tgz",
