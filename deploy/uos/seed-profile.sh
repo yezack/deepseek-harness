@@ -71,5 +71,13 @@ const pinned = {
   "@lemoncat7/dsh-ssh": "1.11.1",
 };
 manifest.dependencies = { ...manifest.dependencies, ...pinned };
+// 覆盖安装时 profile 已经存在，它的 bundles 列表来自上一个版本，可能没有这些
+// 插件。只补 dependencies 不够：包在 node_modules 里，Loader 也不会加载它，
+// 表现就是 "插件装上了但不生效"。追加在末尾，让插件的 patch 层最后应用。
+manifest.dsh = manifest.dsh || {};
+manifest.dsh.profile = manifest.dsh.profile || {};
+const bundles = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles.slice() : [];
+for (const name of Object.keys(pinned)) if (!bundles.includes(name)) bundles.push(name);
+manifest.dsh.profile.bundles = bundles;
 fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
 ' "$MANIFEST"
