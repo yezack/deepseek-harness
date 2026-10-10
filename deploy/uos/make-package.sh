@@ -20,8 +20,9 @@ cp "$BUILD/install.sh" "$PKG/install.sh"
 cp "$BUILD/README.txt" "$PKG/README.txt"
 [ -f "$BUILD/seed-profile.sh" ] || { echo "[错误] $BUILD/seed-profile.sh 不存在"; exit 1; }
 cp "$BUILD/seed-profile.sh" "$PKG/seed-profile.sh"
-# 绝对模式：来源文件可能是 711（SFTP 上传的产物），chmod +x 不会补读位。
+# 绝对模式：来源文件可能是 711 / 600（SFTP 上传的产物），chmod +x 不会补读位。
 chmod 755 "$PKG/install.sh" "$PKG/seed-profile.sh"
+chmod 644 "$PKG/README.txt"
 
 echo "=== 2. 压缩 node ==="
 cd "$BUILD"

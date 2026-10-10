@@ -44,7 +44,8 @@ if [ ! -f "$MANIFEST" ]; then
   "dependencies": {
     "dsh-capability-panel": "1.4.0",
     "@michengai/dsh-archive-manager": "1.0.15",
-    "@lemoncat7/dsh-ssh": "1.11.1"
+    "@lemoncat7/dsh-ssh": "1.11.1",
+    "dshmarket": "1.66.11"
   },
   "dsh": {
     "profile": {
@@ -53,7 +54,8 @@ if [ ! -f "$MANIFEST" ]; then
         "@deepseek-ai/dsh-web-app",
         "dsh-capability-panel",
         "@michengai/dsh-archive-manager",
-        "@lemoncat7/dsh-ssh"
+        "@lemoncat7/dsh-ssh",
+        "dshmarket"
       ]
     }
   }
@@ -69,6 +71,7 @@ const pinned = {
   "dsh-capability-panel": "1.4.0",
   "@michengai/dsh-archive-manager": "1.0.15",
   "@lemoncat7/dsh-ssh": "1.11.1",
+  "dshmarket": "1.66.11",
 };
 manifest.dependencies = { ...manifest.dependencies, ...pinned };
 // 覆盖安装时 profile 已经存在，它的 bundles 列表来自上一个版本，可能没有这些

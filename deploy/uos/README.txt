@@ -55,11 +55,16 @@
   兼容层是幂等的，对现代浏览器只增加约 28KB 页面体积。
 
 预装插件与 chrome-devtools MCP
-  离线包已内置以下三个插件，首次启动即生效，无需联网安装：
+  离线包已内置以下四个插件，首次启动即生效，无需联网安装：
 
     dsh-capability-panel            1.4.0     能力面板
     @michengai/dsh-archive-manager  1.0.15    压缩包管理
     @lemoncat7/dsh-ssh              1.11.1    SSH 连接
+    dshmarket                       1.66.11   插件管理（启停 / 配置）
+
+  dshmarket 的离线边界：**插件的启停、配置、profile 编辑读的是本地状态，
+  可以正常用**；但它的"从市场安装新插件"和"检查更新"需要访问 npm registry，
+  离线环境下会失败 —— 这不是故障，是预期行为。要装新插件请用新的离线包。
 
   它们被写进 web profile 的 bundle 模板，包体在 app/node_modules 里，
   因此目标机不需要 npm registry。某个包缺失时 DSH 会跳过并记录，不会启动失败。
