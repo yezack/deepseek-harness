@@ -27,9 +27,9 @@ ls -l "$INDEX" >/dev/null || { echo "[错误] 缺少索引 $INDEX"; exit 1; }
 
 echo "=== 1. 按索引生成 consumer package.json ==="
 rm -rf "$APP"; mkdir -p "$APP"
-"$NODE" - "$TARBALLS" "$INDEX" "$APP" "$EXTRAS" <<'JSEOF'
+"$NODE" - "$TARBALLS" "$INDEX" "$APP" "$EXTRAS" "$BUILD" <<'JSEOF'
 const fs = require('fs'), path = require('path');
-const [tarballs, indexFile, app, extrasFile] = process.argv.slice(2);
+const [tarballs, indexFile, app, extrasFile, bundleDir] = process.argv.slice(2);
 const idx = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
 const deps = {};
 let miss = [];
@@ -41,7 +41,17 @@ for (const e of idx) {
 let extras = [];
 if (extrasFile && fs.existsSync(extrasFile)) extras = JSON.parse(fs.readFileSync(extrasFile, 'utf8'));
 for (const e of extras) {
-  if (e.name === 'chrome-devtools-mcp' || !deps[e.name]) deps[e.name] = e.version;
+  // 带 spec 的条目从构建目录里的 tarball 安装。@yezack/chrome-devtools-mcp-108 是
+  // 本地 fork，公共 registry 上没有，所以必须走这条路径 —— 对离线包来说也更稳，
+  // 装进去的就是验证过的那一份字节。相对路径按构建目录解析，npm 只认绝对路径。
+  if (e.spec) {
+    const rel = e.spec.replace(/^file:/, '');
+    deps[e.name] = 'file:' + path.resolve(bundleDir, rel);
+    continue;
+  }
+  // 索引里已有同名依赖时保留索引里的版本：node_modules 只能有一份，而后者的
+  // 消费者（例如 dsh 自带的 browser-use 包）对版本有要求。
+  if (!deps[e.name]) deps[e.name] = e.version;
 }
 fs.writeFileSync(path.join(app, 'package.json'), JSON.stringify({
   name: 'dsh-uos-offline-app', version: '0.0.0', private: true, dependencies: deps

@@ -98,8 +98,21 @@
   它们被写进 web profile 的 bundle 模板，包体在 app/node_modules 里，
   因此目标机不需要 npm registry。某个包缺失时 DSH 会跳过并记录，不会启动失败。
 
-  chrome-devtools MCP 同样内置（chrome-devtools-mcp 1.10.1）。它不再使用
-  `npx -y chrome-devtools-mcp@latest`（每次启动都要访问 registry）：
+  chrome-devtools MCP 用的是 @yezack/chrome-devtools-mcp-108 1.10.1 —— 一份
+  chrome-devtools-mcp 1.10.1 的 fork，修掉了 Chrome 108-110 上的目标发现：
+
+    Chrome 111+ 把上游那个 filter（[{type:'page',exclude:true},{}]）理解为
+    "挂 tab 目标、不挂 page 目标"；而 108-110 的 Target.TargetFilter 是早期
+    白名单语义，末尾那个不带 type 的条目**不会**把前面排除掉的类型重新包含
+    回来。结果是页目标一个都挂不上，browser.pages() 恒为空，所有页面工具都
+    失败（list_pages 返回空数组，navigate_page 报 pageId undefined）。
+    fork 在那一处调用外包一层，按 Browser.getVersion 探测主版本，<111 时
+    去掉 filter，111+ 原样透传。
+
+  该包公共 registry 上没有，所以以 tarball 形式随包分发、构建期从本地文件
+  安装（extras.json 里的 file: 条目，实体在 extras/ 目录）。
+
+  它不再使用 `npx -y chrome-devtools-mcp@latest`（每次启动都要访问 registry）：
     - 服务端脚本取自安装目录
     - 浏览器默认 /usr/bin/browser（系统自带 Chromium）
     - 以临时 profile 运行，不触碰用户真实浏览器数据
