@@ -31,33 +31,52 @@ rm -rf "$APP"; mkdir -p "$APP"
 const fs = require('fs'), path = require('path');
 const [tarballs, indexFile, app, extrasFile, bundleDir] = process.argv.slice(2);
 const idx = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+let extras = [];
+if (extrasFile && fs.existsSync(extrasFile)) extras = JSON.parse(fs.readFileSync(extrasFile, 'utf8'));
+
+// 带 override 的条目不是普通依赖：它要把 tarball 装到**另一个包名**下，让所有按
+// 包名解析的消费者都拿到它。dsh 自带的 browser-use 包用
+// import.meta.resolve('chrome-devtools-mcp/...') 定位服务端，所以只有让
+// node_modules/chrome-devtools-mcp 本身就变成 108 fork，那条路径才用得上修复。
+const overridden = new Set();
+const overrides = {};
+for (const e of extras) {
+  if (!e.override) continue;
+  overridden.add(e.override);
+  overrides[e.override] = 'file:' + path.resolve(bundleDir, e.spec.replace(/^file:/, ''));
+}
+
 const deps = {};
 let miss = [];
 for (const e of idx) {
+  // 被 override 的包不能同时出现在 dependencies 里，npm 会报 EOVERRIDE
+  // （override 与直接依赖冲突）。它由 overrides 提供。
+  if (overridden.has(e.name)) continue;
   const f = path.join(tarballs, e.file);
   if (!fs.existsSync(f)) { miss.push(e.file); continue; }
   deps[e.name] = 'file:' + f;
 }
-let extras = [];
-if (extrasFile && fs.existsSync(extrasFile)) extras = JSON.parse(fs.readFileSync(extrasFile, 'utf8'));
 for (const e of extras) {
+  if (e.override) continue;
   // 带 spec 的条目从构建目录里的 tarball 安装。@yezack/chrome-devtools-mcp-108 是
   // 本地 fork，公共 registry 上没有，所以必须走这条路径 —— 对离线包来说也更稳，
   // 装进去的就是验证过的那一份字节。相对路径按构建目录解析，npm 只认绝对路径。
   if (e.spec) {
-    const rel = e.spec.replace(/^file:/, '');
-    deps[e.name] = 'file:' + path.resolve(bundleDir, rel);
+    deps[e.name] = 'file:' + path.resolve(bundleDir, e.spec.replace(/^file:/, ''));
     continue;
   }
   // 索引里已有同名依赖时保留索引里的版本：node_modules 只能有一份，而后者的
   // 消费者（例如 dsh 自带的 browser-use 包）对版本有要求。
   if (!deps[e.name]) deps[e.name] = e.version;
 }
-fs.writeFileSync(path.join(app, 'package.json'), JSON.stringify({
-  name: 'dsh-uos-offline-app', version: '0.0.0', private: true, dependencies: deps
-}, null, 2));
+const pkg = {
+  name: 'dsh-uos-offline-app', version: '0.0.0', private: true, dependencies: deps,
+};
+if (Object.keys(overrides).length > 0) pkg.overrides = overrides;
+fs.writeFileSync(path.join(app, 'package.json'), JSON.stringify(pkg, null, 2));
 console.log('  索引条目:', idx.length, ' 第三方:', extras.length,
-  ' 生成依赖:', Object.keys(deps).length, ' 缺失:', miss.length);
+  ' 生成依赖:', Object.keys(deps).length, ' override:', Object.keys(overrides).length,
+  ' 缺失:', miss.length);
 if (miss.length) console.log('  缺失样例:', miss.slice(0, 5));
 JSEOF
 

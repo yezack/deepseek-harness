@@ -581,13 +581,19 @@
 # browser state, and the launcher exports both paths — a non-default install
 # directory therefore needs no edit here.
 #
-# The package is @yezack/chrome-devtools-mcp-108, a fork of chrome-devtools-mcp
-# 1.10.1 that fixes target discovery on Chrome 108-110. Those builds implement
-# Target.TargetFilter with early allowlist semantics, so upstream's trailing
-# typeless entry does not re-include the page type an earlier entry excluded:
-# nothing is auto-attached, `browser.pages()` stays empty, and every page tool
-# fails. UOS 20 ships Chrome 126 where upstream works either way; the fork
-# probes the major version once and only rewrites the filter below 111.
+# The package at node_modules/chrome-devtools-mcp is @yezack/chrome-devtools-mcp-108,
+# a fork of chrome-devtools-mcp 1.10.1 that fixes target discovery on Chrome
+# 108-110. Those builds implement Target.TargetFilter with early allowlist
+# semantics, so upstream's trailing typeless entry does not re-include the page
+# type an earlier entry excluded: nothing is auto-attached, `browser.pages()`
+# stays empty, and every page tool fails. UOS 20 ships Chrome 126 where upstream
+# works either way; the fork probes the major version once and only rewrites the
+# filter below 111.
+#
+# The offline image installs that fork under the upstream name with an npm
+# override, so this row, the launcher, and dsh's own browser-use provider - which
+# locates its server through import.meta.resolve('chrome-devtools-mcp/...') -
+# all reach the same patched copy.
 #
 # No `--headless`: the deepin browser build on UOS 20 aborts on every headless
 # variant (`trap int3`, Chromium CHECK failure), while the same binary runs and
@@ -602,7 +608,7 @@
         transport: stdio
         command: node
         args:
-          - !!js "process.env.DSH_CHROME_DEVTOOLS_MCP ?? '/deepseek-harness/app/node_modules/@yezack/chrome-devtools-mcp-108/build/src/bin/chrome-devtools-mcp.js'"
+          - !!js "process.env.DSH_CHROME_DEVTOOLS_MCP ?? '/deepseek-harness/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js'"
           - '--executablePath'
           - !!js "process.env.DSH_CHROME_PATH ?? '/usr/bin/browser'"
           - '--isolated'

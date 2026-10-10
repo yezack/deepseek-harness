@@ -109,8 +109,19 @@
     fork 在那一处调用外包一层，按 Browser.getVersion 探测主版本，<111 时
     去掉 filter，111+ 原样透传。
 
-  该包公共 registry 上没有，所以以 tarball 形式随包分发、构建期从本地文件
-  安装（extras.json 里的 file: 条目，实体在 extras/ 目录）。
+  **整个安装只有这一份 chrome-devtools MCP，全部用它。** 做法是构建期用 npm
+  overrides 把 fork 装到上游那个包名下：
+
+      "overrides": { "chrome-devtools-mcp": "file:extras/…108….tgz" }
+
+  这样 node_modules/chrome-devtools-mcp 的内容就是 fork，于是三处按包名解析的
+  消费者同时拿到它：本 MCP 行、start-web.sh 导出的路径，以及 DSH 自带的
+  @deepseek-ai/dsh-experimental-browser-use-chrome-devtools-mcp —— 后者用
+  import.meta.resolve('chrome-devtools-mcp/...') 定位服务端，只有包名相同才
+  用得上修复。结果是 15 MB 一份，没有第二份副本。
+
+  fork 的 tarball 不在任何镜像上（npmjs 有，本构建用的 npmmirror 没有），所以
+  以 tarball 形式随包分发，实体在 extras/ 目录。
 
   它不再使用 `npx -y chrome-devtools-mcp@latest`（每次启动都要访问 registry）：
     - 服务端脚本取自安装目录

@@ -84,7 +84,7 @@ export NARB_NATIVE_CACHE_DIR=/var/tmp/dsh-native-cache
 # chrome-devtools MCP: the copy inside the installation, launched by this node,
 # driving the platform's own Chromium. Exported rather than written into the
 # profile so a non-default DSH_DEST needs no further edit.
-export DSH_CHROME_DEVTOOLS_MCP="$DEST/app/node_modules/@yezack/chrome-devtools-mcp-108/build/src/bin/chrome-devtools-mcp.js"
+export DSH_CHROME_DEVTOOLS_MCP="$DEST/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
 export DSH_CHROME_PATH="\${DSH_CHROME_PATH:-/usr/bin/browser}"
 # UOS 的 deepin 浏览器 headless 必崩（trap int3），只能跑在桌面会话上，
 # 所以 MCP 不带 --headless，并且这里保证 DISPLAY 可用。

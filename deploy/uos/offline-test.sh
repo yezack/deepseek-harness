@@ -60,7 +60,7 @@ if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]
 fi
 NODE_BIN="$(command -v node)"
 [ -x "$NODE_BIN" ] || NODE_BIN=/var/tmp/dsh-node/bin/node
-MCP="$DEST/app/node_modules/@yezack/chrome-devtools-mcp-108/build/src/bin/chrome-devtools-mcp.js"
+MCP="$DEST/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
 echo "  node: $NODE_BIN"
 echo "  mcp : $MCP"
 echo "  运行身份: ${RUN_AS:-当前用户}   浏览器: ${DSH_CHROME_PATH:-/usr/bin/browser}   DISPLAY=${DISPLAY:-:0}"
