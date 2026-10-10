@@ -73,7 +73,12 @@ if [ -n "$KOFFI_VER" ]; then
 fi
 ls -la "$APP/node_modules/@koromix/koffi-linux-x64/linux_x64/" 2>/dev/null || echo "  ⚠️ @koromix 未安装"
 
-echo "=== 4. 验证 ==="
+echo "=== 4. 隐藏 dsh-remote-mobile 的 Tailscale 入口 ==="
+# 目标环境是隔离局域网，没有 Tailscale，留着那个入口会误导操作员。插件没有隐藏
+# 开关，所以改它打包好的客户端代码；脚本在锚点漂移时直接失败，不会静默跳过。
+"$NODE" "$BUILD/patch-remote-mobile.mjs" "$APP"
+
+echo "=== 5. 验证 ==="
 "$NODE" "$APP/node_modules/@deepseek-ai/dsh/lib/bin.js" --version 2>&1 | head -3
 "$NODE" -e "const k=require('$APP/node_modules/koffi'); console.log('KOFFI_OK', typeof k.load)" 2>&1 | head -2
 du -sh "$APP/node_modules" 2>/dev/null

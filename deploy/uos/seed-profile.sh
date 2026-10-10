@@ -28,7 +28,7 @@ MODULES="$PROFILE/node_modules"
 # 预装插件的唯一清单：name@version。软链、dependencies、bundles 三处都由它派生，
 # 避免清单写多份后漏改其中一处（dshmarket 那次就是漏改软链那一份）。
 # 与 packages/boot/app-boot/src/profile.ts 的 web 模板保持一致。
-BUNDLES="dsh-capability-panel@1.4.0 @michengai/dsh-archive-manager@1.0.15 @lemoncat7/dsh-ssh@1.11.1 dshmarket@1.66.11"
+BUNDLES="dsh-capability-panel@1.4.0 @michengai/dsh-archive-manager@1.0.15 @lemoncat7/dsh-ssh@1.11.1 dsh-remote-mobile@1.9.0 dshmarket@1.66.11"
 
 for entry in $BUNDLES; do
   name="${entry%@*}"

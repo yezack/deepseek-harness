@@ -55,16 +55,35 @@
   兼容层是幂等的，对现代浏览器只增加约 28KB 页面体积。
 
 预装插件与 chrome-devtools MCP
-  离线包已内置以下四个插件，首次启动即生效，无需联网安装：
+  离线包已内置以下五个插件，首次启动即生效，无需联网安装：
 
     dsh-capability-panel            1.4.0     能力面板
     @michengai/dsh-archive-manager  1.0.15    压缩包管理
     @lemoncat7/dsh-ssh              1.11.1    SSH 连接
+    dsh-remote-mobile               1.9.0     远程与移动端接入（扫码配对）
     dshmarket                       1.66.11   插件管理（启停 / 配置）
 
   dshmarket 的离线边界：**插件的启停、配置、profile 编辑读的是本地状态，
   可以正常用**；但它的"从市场安装新插件"和"检查更新"需要访问 npm registry，
   离线环境下会失败 —— 这不是故障，是预期行为。要装新插件请用新的离线包。
+
+  dsh-remote-mobile 需要额外一步才能对外服务：它把 DSH 开放给手机和其他
+  局域网设备，而 DSH 默认只监听 127.0.0.1。要让手机连得上，必须在
+  ~/.dsh/profiles/web/cordis.patch.yml 里放开监听：
+
+      - id: webserver
+        config:
+          host: 0.0.0.0
+          port: 3080
+
+  安装脚本**故意不写这条** —— 它把 DSH 的 Web 控制台（含终端与工作区能力）
+  暴露给整个网络。装好插件后进"设置 -> 远程与移动端"扫码配对即可，插件自带
+  访问控制、RSA 加密与防爆破锁定。仅在隔离内网使用。
+
+  这个包已经把设置页里的"Tailscale 虚拟私网接入 (推荐)"整块隐藏了：目标环境是
+  隔离局域网，没有 Tailscale，留着那个入口只会误导操作员。做法是构建期改插件
+  打包好的客户端代码（插件没提供隐藏开关），补丁脚本是 patch-remote-mobile.mjs，
+  锚点找不到时会直接让构建失败，不会静默跳过。局域网与扫码配对部分不受影响。
 
   它们被写进 web profile 的 bundle 模板，包体在 app/node_modules 里，
   因此目标机不需要 npm registry。某个包缺失时 DSH 会跳过并记录，不会启动失败。
