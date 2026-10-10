@@ -54,8 +54,13 @@ JSEOF
 echo "=== 2. npm install ==="
 echo "  --legacy-peer-deps  : 绕过 npm/arborist 的 edgesOut 崩溃"
 echo "  --ignore-scripts    : 跳过 koffi 源码编译（改用预编译包）"
+# 走镜像：直连 registry.npmjs.org 在这台构建机上会读超时/ECONNRESET（dshmarket
+# 就是这么失败的），镜像覆盖全部传递依赖。可用 NPM_REGISTRY 覆盖。
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+echo "  registry            : $NPM_REGISTRY"
 cd "$APP"
-"$NODE" "$NPM" install --no-audit --no-fund --legacy-peer-deps --ignore-scripts --loglevel=warn 2>&1 | tail -15
+"$NODE" "$NPM" install --no-audit --no-fund --legacy-peer-deps --ignore-scripts \
+  --registry "$NPM_REGISTRY" --loglevel=warn 2>&1 | tail -15
 echo "  npm 退出码=${PIPESTATUS[0]}"
 
 echo "=== 3. koffi 官方预编译包 ==="
@@ -63,6 +68,7 @@ KOFFI_VER=$("$NODE" -e "try{console.log(require('$APP/node_modules/koffi/package
 echo "  koffi 版本: ${KOFFI_VER:-未安装}"
 if [ -n "$KOFFI_VER" ]; then
   ( cd "$APP" && "$NODE" "$NPM" install --no-audit --no-fund --no-save --force --ignore-scripts \
+      --registry "$NPM_REGISTRY" \
       "@koromix/koffi-linux-x64@$KOFFI_VER" 2>&1 | tail -4 ) || true
 fi
 ls -la "$APP/node_modules/@koromix/koffi-linux-x64/linux_x64/" 2>/dev/null || echo "  ⚠️ @koromix 未安装"
