@@ -249,9 +249,31 @@ pnpm run release:pack --family vendor --out dist/npm-vendor   # -> 9 个
 ```
 deploy/
 ├── README.md                本方案
-└── uos/                     UOS 安装脚本（源码形式）
+├── tools/                    构建与验证工具（开发机侧）
+│   ├── README.md             流程顺序与每个工具的用法
+│   ├── gen-index.ps1         从 release 产物生成 tarball 索引
+│   ├── assemble-bundle.ps1   组装上传给构建机的传输包
+│   ├── check-template.mjs    compat 模板静态检查
+│   ├── test-compat.mjs       兼容层 JS 回归（55 项）
+│   ├── test-injection.mjs    注入位置与顺序（18 项）
+│   ├── check-mcp-row.mjs     chrome-devtools MCP 行校验
+│   ├── find-tailscale-block.mjs  定位 Tailscale 块边界
+│   ├── test-hide-tailscale.mjs   验证隐藏补丁
+│   ├── gen-compat-standalone.mjs 生成浏览器测试脚本
+│   ├── css-test.html / mutation-test.html  浏览器侧差分与开销
+│   └── cdp-lite-mcp.js       无 puppeteer 的 CDP MCP（排查退路，未接入镜像）
+└── uos/                      UOS 安装脚本（源码形式）
     ├── install.sh
-    └── README.txt
+    ├── seed-profile.sh       启动前预置 profile 的 bundle
+    ├── materialize-uos.sh    构建机侧：物化依赖树
+    ├── make-package.sh       构建机侧：打成最终离线包
+    ├── patch-remote-mobile.mjs  构建期隐藏 Tailscale 入口
+    ├── offline-test.sh       离线自检
+    ├── extras.json           第三方预装清单
+    ├── extras/*.tgz          不在任何 registry 上的预装件
+    └── README.txt            随包交给操作员的说明
 ```
 
-> 离线包（558 MB）体积过大，不放进仓库；请按本文档的构建流程自行生成，或从已有的交付物复制。
+工具用法见 [tools/README.md](tools/README.md)。
+
+> 离线包（约 570 MB）体积过大，不放进仓库；请按本文档的构建流程自行生成，或从已有的交付物复制。
