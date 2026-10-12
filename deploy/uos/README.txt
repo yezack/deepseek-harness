@@ -99,8 +99,10 @@
   它们被写进 web profile 的 bundle 模板，包体在 app/node_modules 里，
   因此目标机不需要 npm registry。某个包缺失时 DSH 会跳过并记录，不会启动失败。
 
-  chrome-devtools MCP 用的是 @yezack/chrome-devtools-mcp-108 1.10.1 —— 一份
-  chrome-devtools-mcp 1.10.1 的 fork，修掉了 Chrome 108-110 上的目标发现：
+  chrome-devtools MCP 用的是 @yezack/chrome-devtools-mcp-108 1.10.3 —— 一份
+  chrome-devtools-mcp 的 fork，两处改动：
+
+  【1】Chrome 108-110 的目标发现
 
     Chrome 111+ 把上游那个 filter（[{type:'page',exclude:true},{}]）理解为
     "挂 tab 目标、不挂 page 目标"；而 108-110 的 Target.TargetFilter 是早期
@@ -109,6 +111,16 @@
     失败（list_pages 返回空数组，navigate_page 报 pageId undefined）。
     fork 在那一处调用外包一层，按 Browser.getVersion 探测主版本，<111 时
     去掉 filter，111+ 原样透传。
+
+  【2】浏览器 profile 默认放到临时目录（1.10.3 起）
+
+    上游的默认 user-data-dir 是 $HOME/.cache/chrome-devtools-mcp/chrome-profile。
+    /home 在加固过的机器上可能是只读挂载，那条 mkdir 会直接失败、MCP 起不来。
+    1.10.3 把 isolated 的默认值改成 true，profile 建在系统临时目录并在浏览器
+    关闭时清理；要回到持久 profile 得显式传 --no-isolated 或 --user-data-dir。
+
+    本包仍然在 MCP 行里显式传 --isolated：行为不依赖包的默认值，将来换版本也
+    不会因为上游改默认而变。
 
   **整个安装只有这一份 chrome-devtools MCP，全部用它。** 做法是构建期用 npm
   overrides 把 fork 装到上游那个包名下：

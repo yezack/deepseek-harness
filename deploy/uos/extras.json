@@ -7,7 +7,7 @@
   { "name": "dsh-rewind-plugin", "version": "0.15.1" },
   {
     "name": "@yezack/chrome-devtools-mcp-108",
-    "spec": "file:extras/yezack-chrome-devtools-mcp-108-1.10.1.tgz",
+    "spec": "file:extras/yezack-chrome-devtools-mcp-108-1.10.3.tgz",
     "override": "chrome-devtools-mcp"
   }
 ]

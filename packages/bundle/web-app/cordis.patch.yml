@@ -582,13 +582,22 @@
 # directory therefore needs no edit here.
 #
 # The package at node_modules/chrome-devtools-mcp is @yezack/chrome-devtools-mcp-108,
-# a fork of chrome-devtools-mcp 1.10.1 that fixes target discovery on Chrome
-# 108-110. Those builds implement Target.TargetFilter with early allowlist
-# semantics, so upstream's trailing typeless entry does not re-include the page
-# type an earlier entry excluded: nothing is auto-attached, `browser.pages()`
-# stays empty, and every page tool fails. UOS 20 ships Chrome 126 where upstream
-# works either way; the fork probes the major version once and only rewrites the
-# filter below 111.
+# a fork with two changes.
+#
+# Target discovery on Chrome 108-110: those builds implement Target.TargetFilter
+# with early allowlist semantics, so upstream's trailing typeless entry does not
+# re-include the page type an earlier entry excluded: nothing is auto-attached,
+# `browser.pages()` stays empty, and every page tool fails. UOS 20 ships Chrome
+# 126 where upstream works either way; the fork probes the major version once and
+# only rewrites the filter below 111.
+#
+# Browser profile location: from the fork's 1.10.3 the `isolated` default is true,
+# so the profile lives under the OS temp directory and is removed with the
+# browser. Upstream's persistent default is
+# $HOME/.cache/chrome-devtools-mcp/chrome-profile, and /home can be a read-only
+# mount on a hardened host, where that mkdir fails and the server never starts.
+# The row still passes --isolated explicitly so the behavior does not ride on a
+# default that a future version could change back.
 #
 # The offline image installs that fork under the upstream name with an npm
 # override, so this row, the launcher, and dsh's own browser-use provider - which
