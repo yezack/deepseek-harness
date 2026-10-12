@@ -99,8 +99,8 @@
   它们被写进 web profile 的 bundle 模板，包体在 app/node_modules 里，
   因此目标机不需要 npm registry。某个包缺失时 DSH 会跳过并记录，不会启动失败。
 
-  chrome-devtools MCP 用的是 @yezack/chrome-devtools-mcp-108 1.10.3 —— 一份
-  chrome-devtools-mcp 的 fork，两处改动：
+  chrome-devtools MCP 用的是 @yezack/chrome-devtools-mcp-108 1.10.4 —— 一份
+  chrome-devtools-mcp 的 fork，三处改动：
 
   【1】Chrome 108-110 的目标发现
 
@@ -121,6 +121,17 @@
 
     本包仍然在 MCP 行里显式传 --isolated：行为不依赖包的默认值，将来换版本也
     不会因为上游改默认而变。
+
+  【3】版本检查缓存也避开只读 home（1.10.4 起）
+
+    版本检查原本固定写 $HOME/.cache/chrome-devtools-mcp/latest.json（20 字节），
+    不受 profile 设置影响，所以只读 home 每次启动仍会吃一次写失败。1.10.4 改成
+    在 $HOME/.cache/chrome-devtools-mcp 与 $TMPDIR/chrome-devtools-mcp 之间取
+    第一个可写目录：正常机器沿用上游位置，只读 home 退到临时目录。
+    CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1 可完全跳过这次检查。
+
+  只读 /home 的实际表现已在 UOS 上验证：把 ~/.cache/chrome-devtools-mcp 设为
+  555 后不带 --isolated 启动，页面工具正常，/home 下没有 chrome-profile。
 
   **整个安装只有这一份 chrome-devtools MCP，全部用它。** 做法是构建期用 npm
   overrides 把 fork 装到上游那个包名下：
