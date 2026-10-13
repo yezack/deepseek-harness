@@ -624,3 +624,12 @@
           - '--executablePath'
           - !!js "process.env.DSH_CHROME_PATH ?? '/usr/bin/browser'"
           - '--isolated'
+        # The browser needs a writable $HOME even when --isolated moves its
+        # profile to a temp directory. The 360 enterprise browser on the police
+        # image still writes $HOME/.config/browser360ent on every launch - the
+        # crashpad database, shader caches, Variations - and chrome_crashpad_handler
+        # refuses to start without a usable --database. The browser then never
+        # exposes CDP, and puppeteer reports only "Protocol error ... Target closed".
+        # The launcher exports DSH_CHROME_HOME pointing at a writable directory.
+        env:
+          HOME: !!js process.env.DSH_CHROME_HOME ?? '/var/tmp/dsh-chrome-home'

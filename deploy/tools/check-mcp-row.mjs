@@ -30,11 +30,15 @@ const checks = {
   '不指向 fork 的原始包名': !actual.includes('@yezack/'),
   '不带 headless': !row?.config?.args?.includes('--headless'),
   '浏览器路径可覆盖': String(row?.config?.args?.[2] ?? '').includes('DSH_CHROME_PATH'),
+  // 浏览器子进程必须拿到可写的 $HOME：360 的 crashpad 没有它就拿不到 --database，
+  // CDP 起不来，puppeteer 只报 Target closed。
+  '注入可写 HOME': String(row?.config?.env?.HOME ?? '').includes('DSH_CHROME_HOME'),
 }
 
 console.log('  insert 行数           :', rows.length)
 console.log('  serverName            :', row?.config?.serverName)
 console.log('  args                  :', JSON.stringify(row?.config?.args))
+console.log('  env.HOME              :', JSON.stringify(row?.config?.env?.HOME))
 for (const [label, ok] of Object.entries(checks)) {
   console.log('  ' + (ok ? '✓' : '✗') + ' ' + label)
 }

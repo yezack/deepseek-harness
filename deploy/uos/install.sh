@@ -55,13 +55,33 @@ if [ -d "$KOROMIX_SRC" ]; then
   echo "      koffi 原生模块已链接到白名单路径"
 fi
 
-# chrome-devtools MCP 需要一个浏览器；只报告不阻断，其余功能不依赖它。
-CHROME_BIN="${DSH_CHROME_PATH:-/usr/bin/browser}"
-if [ -x "$CHROME_BIN" ]; then
-  echo "      chrome-devtools 浏览器: $CHROME_BIN ($("$CHROME_BIN" --version 2>/dev/null | head -1))"
+# chrome-devtools MCP 需要一个浏览器。只报告不阻断，其余功能不依赖它。
+#
+# 候选有优先级：360 企业浏览器在前。它在本类加固镜像上才是内核较新的那个
+# （上海公安全能安全浏览器 13.3.3200.187 = Chrome/108.0.5359.95），而 deepin
+# 自带的 /usr/bin/browser 在部分版本上只有 Chrome 93，puppeteer 25 驱动不了。
+if [ -n "${DSH_CHROME_PATH:-}" ]; then
+  CHROME_BIN="$DSH_CHROME_PATH"
 else
+  CHROME_BIN=""
+  for candidate in /usr/bin/browser360ent-cn-stable /usr/bin/browser /usr/bin/chromium /usr/bin/google-chrome; do
+    if [ -x "$candidate" ]; then CHROME_BIN="$candidate"; break; fi
+  done
+fi
+if [ -n "$CHROME_BIN" ] && [ -x "$CHROME_BIN" ]; then
+  echo "      chrome-devtools 浏览器: $CHROME_BIN ($("$CHROME_BIN" --version 2>/dev/null | tail -1))"
+else
+  CHROME_BIN="${DSH_CHROME_PATH:-/usr/bin/browser}"
   echo "      [警告] $CHROME_BIN 不存在，chrome-devtools MCP 无法启动浏览器"
 fi
+
+# 浏览器子进程需要一个可写的 $HOME。360 企业版即使收到 --user-data-dir，仍固定
+# 往 $HOME/.config/browser360ent 写 crashpad 数据库与着色器缓存；$HOME 不可写时
+# crashpad 拿不到 --database，浏览器的 CDP 端点起不来，puppeteer 只会报
+# "Protocol error ... Target closed" —— 与 --isolated / user-data-dir 无关。
+CHROME_HOME="/var/tmp/dsh-chrome-home"
+mkdir -p "$CHROME_HOME"
+chmod 1777 "$CHROME_HOME" 2>/dev/null || true
 
 # 预置脚本随包发布，由 start-web.sh 每次启动前调用（幂等）。
 if [ ! -f "$HERE/seed-profile.sh" ]; then
@@ -85,11 +105,14 @@ export NARB_NATIVE_CACHE_DIR=/var/tmp/dsh-native-cache
 # driving the platform's own Chromium. Exported rather than written into the
 # profile so a non-default DSH_DEST needs no further edit.
 export DSH_CHROME_DEVTOOLS_MCP="$DEST/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
-export DSH_CHROME_PATH="\${DSH_CHROME_PATH:-/usr/bin/browser}"
+export DSH_CHROME_PATH="\${DSH_CHROME_PATH:-$CHROME_BIN}"
+# 浏览器子进程的 $HOME：安装时选定的可写目录。MCP 行把它注入子进程环境，
+# 360 的 crashpad 才有地方写 --database。
+export DSH_CHROME_HOME="\${DSH_CHROME_HOME:-$CHROME_HOME}"
 # UOS 的 deepin 浏览器 headless 必崩（trap int3），只能跑在桌面会话上，
 # 所以 MCP 不带 --headless，并且这里保证 DISPLAY 可用。
 export DISPLAY="\${DISPLAY:-:0}"
-mkdir -p "\$DSH_HOME" /var/tmp/dsh-native-cache 2>/dev/null
+mkdir -p "\$DSH_HOME" "\$DSH_CHROME_HOME" /var/tmp/dsh-native-cache 2>/dev/null
 # 预装 bundle 必须在 DSH 首次创建 profile 之前就位，否则 Loader 从 profile
 # 目录解析不到它们，只会记一条 "failed to import" 并静默停用插件。
 SEED_NODE="$INSTALL_NODE_DIR/bin/node" "$DEST/seed-profile.sh" "$DEST"

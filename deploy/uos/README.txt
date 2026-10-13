@@ -149,11 +149,35 @@
 
   它不再使用 `npx -y chrome-devtools-mcp@latest`（每次启动都要访问 registry）：
     - 服务端脚本取自安装目录
-    - 浏览器默认 /usr/bin/browser（系统自带 Chromium）
+    - 浏览器：安装时从下列候选里选第一个存在的
+        1. $DSH_CHROME_PATH（显式指定优先）
+        2. /usr/bin/browser360ent-cn-stable   360 企业浏览器
+        3. /usr/bin/browser                   deepin 自带
+      360 优先，因为在这类加固镜像上它才是内核较新的那个（实测"上海公安全能
+      安全浏览器 13.3.3200.187" = Chrome/108.0.5359.95），而 deepin 自带的
+      /usr/bin/browser 在部分版本上只有 Chrome 93，puppeteer 25 驱动不了。
     - 以临时 profile 运行，不触碰用户真实浏览器数据
     - 不使用 headless：UOS 的 deepin 浏览器 headless 必崩（trap int3），
       只能跑在桌面会话里。MCP 因此会打开一个可见窗口，
       start-web.sh 已导出 DISPLAY（默认 :0）
+
+  ⚠️ 浏览器子进程需要一个**可写的 $HOME**，这与 profile 隔离是两件事。
+
+     360 企业版即使收到 --user-data-dir，仍固定往 $HOME/.config/browser360ent
+     写 crashpad 数据库、着色器缓存、Variations。$HOME 不可写时
+     chrome_crashpad_handler 拿不到 --database（日志只有一行
+     "chrome_crashpad_handler: --database is required"），浏览器的 CDP 端点起
+     不来，puppeteer 最终只报 "Protocol error ... Target closed" —— 而
+     --isolated 和 --user-data-dir 都救不了，因为崩的不是 Chromium profile。
+
+     所以 MCP 行给子进程注入了 HOME：
+
+         env:
+           HOME: process.env.DSH_CHROME_HOME ?? '/var/tmp/dsh-chrome-home'
+
+     start-web.sh 会导出 DSH_CHROME_HOME 并保证该目录存在（安装时创建，
+     权限 1777）。$HOME 只读的机器靠这一条即可正常驱动浏览器，不需要动
+     /home 挂载。
 
   可用环境变量覆盖，start-web.sh 已按实际安装目录导出：
     DSH_CHROME_PATH          浏览器可执行文件
