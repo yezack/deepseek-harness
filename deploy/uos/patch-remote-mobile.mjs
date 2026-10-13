@@ -1,4 +1,15 @@
-// 从 dsh-remote-mobile 的客户端 bundle 里隐藏 "Tailscale 虚拟私网接入 (推荐)" 这一块。
+// 对 @yezack/dsh-remote-mobile 这个预装插件做两处构建期修正。
+//
+// 【1】修正 bundle patch 里的 row name
+//
+// 包名是 @yezack/dsh-remote-mobile，但发布出来的 cordis.patch.yml 里 row 的
+// name 仍是上游的 'dsh-remote-mobile'。两者必须一致：client-modules 会用 row 的
+// name 做 `require.resolve('<name>/package.json')`（packages/client/modules/src/
+// index.ts:886），profile 的 node_modules 里只有 @yezack/dsh-remote-mobile，
+// 旧名字解析不到，插件就 failed to import 并静默停用。这里按 package.json 的
+// 实际包名纠正，避免依赖上游发布修复。
+//
+// 【2】隐藏客户端里的 "Tailscale 虚拟私网接入 (推荐)" 块
 //
 // 目标环境是隔离局域网，没有 Tailscale；留着这个入口会让操作员以为它可用。
 // 插件没有提供隐藏开关（Config 只有 SessionStoreOptions），所以只能改它打包好的
@@ -16,7 +27,34 @@ if (appDir === undefined) {
   process.exit(1)
 }
 
-const file = path.join(appDir, 'node_modules', 'dsh-remote-mobile', 'lib', 'client.js')
+const packageDir = path.join(appDir, 'node_modules', '@yezack', 'dsh-remote-mobile')
+const manifestPath = path.join(packageDir, 'package.json')
+if (!fs.existsSync(manifestPath)) {
+  console.error(`[patch-remote-mobile] 未找到 ${manifestPath}`)
+  process.exit(1)
+}
+const packageName = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).name
+
+// 【1】row name 必须等于包名。
+const patchPath = path.join(packageDir, 'cordis.patch.yml')
+if (!fs.existsSync(patchPath)) {
+  console.error(`[patch-remote-mobile] 未找到 ${patchPath}`)
+  process.exit(1)
+}
+const patchSource = fs.readFileSync(patchPath, 'utf8')
+const nameMatch = /^(\s*name:\s*)'([^']+)'\s*$/mu.exec(patchSource)
+if (nameMatch === null) {
+  console.error('[patch-remote-mobile] cordis.patch.yml 里找不到 name 行，拒绝猜测')
+  process.exit(1)
+}
+if (nameMatch[2] !== packageName) {
+  fs.writeFileSync(patchPath, patchSource.replace(nameMatch[0], `${nameMatch[1]}'${packageName}'`))
+  console.log(`[patch-remote-mobile] row name: '${nameMatch[2]}' -> '${packageName}'`)
+} else {
+  console.log(`[patch-remote-mobile] row name 已与包名一致（${packageName}）`)
+}
+
+const file = path.join(packageDir, 'lib', 'client.js')
 if (!fs.existsSync(file)) {
   console.error(`[patch-remote-mobile] 未找到 ${file}`)
   process.exit(1)

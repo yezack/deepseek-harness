@@ -198,7 +198,7 @@ export const PROFILE_TEMPLATES: Record<string, ProfileTemplate> = {
       'dsh-capability-panel',
       '@michengai/dsh-archive-manager',
       '@lemoncat7/dsh-ssh',
-      'dsh-remote-mobile',
+      '@yezack/dsh-remote-mobile',
       'dsh-rewind-plugin',
       'dshmarket',
     ],

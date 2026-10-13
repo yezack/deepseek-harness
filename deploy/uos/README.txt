@@ -60,7 +60,7 @@
     dsh-capability-panel            1.4.0     能力面板
     @michengai/dsh-archive-manager  1.0.15    压缩包管理
     @lemoncat7/dsh-ssh              1.11.1    SSH 连接
-    dsh-remote-mobile               1.9.0     远程与移动端接入（扫码配对）
+    @yezack/dsh-remote-mobile       1.9.0     远程与移动端接入（扫码配对，自维护 fork）
     dsh-rewind-plugin               0.15.1    会话回退
     dshmarket                       1.66.11   插件管理（启停 / 配置）
 
@@ -68,7 +68,7 @@
   可以正常用**；但它的"从市场安装新插件"和"检查更新"需要访问 npm registry，
   离线环境下会失败 —— 这不是故障，是预期行为。要装新插件请用新的离线包。
 
-  dsh-remote-mobile 需要额外一步才能对外服务：它把 DSH 开放给手机和其他
+  @yezack/dsh-remote-mobile 需要额外一步才能对外服务：它把 DSH 开放给手机和其他
   局域网设备，而 DSH 默认只监听 127.0.0.1。要让手机连得上，必须在
   ~/.dsh/profiles/web/cordis.patch.yml 里放开监听：
 
@@ -95,6 +95,15 @@
   隔离局域网，没有 Tailscale，留着那个入口只会误导操作员。做法是构建期改插件
   打包好的客户端代码（插件没提供隐藏开关），补丁脚本是 patch-remote-mobile.mjs，
   锚点找不到时会直接让构建失败，不会静默跳过。局域网与扫码配对部分不受影响。
+
+  同一个补丁脚本还纠正一处发布缺陷：@yezack/dsh-remote-mobile 1.9.0 的
+  cordis.patch.yml 里 row 的 name 仍是上游的 'dsh-remote-mobile'，而 client-modules
+  会用 row 名做 require.resolve('<name>/package.json')，profile 里只有新包名，
+  旧名字解析不到就会 failed to import 并静默停用。脚本按 package.json 的实际包名
+  改写成 '@yezack/dsh-remote-mobile'。
+
+  该 fork 的 tarball 同样不在任何镜像上（npmjs 有、构建用的 npmmirror 没有），
+  所以也以 tarball 形式随包分发。
 
   它们被写进 web profile 的 bundle 模板，包体在 app/node_modules 里，
   因此目标机不需要 npm registry。某个包缺失时 DSH 会跳过并记录，不会启动失败。

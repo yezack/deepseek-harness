@@ -28,7 +28,14 @@ MODULES="$PROFILE/node_modules"
 # 预装插件的唯一清单：name@version。软链、dependencies、bundles 三处都由它派生，
 # 避免清单写多份后漏改其中一处（dshmarket 那次就是漏改软链那一份）。
 # 与 packages/boot/app-boot/src/profile.ts 的 web 模板保持一致。
-BUNDLES="dsh-capability-panel@1.4.0 @michengai/dsh-archive-manager@1.0.15 @lemoncat7/dsh-ssh@1.11.1 dsh-remote-mobile@1.9.0 dsh-rewind-plugin@0.15.1 dshmarket@1.66.11"
+BUNDLES="dsh-capability-panel@1.4.0 @michengai/dsh-archive-manager@1.0.15 @lemoncat7/dsh-ssh@1.11.1 @yezack/dsh-remote-mobile@1.9.0 dsh-rewind-plugin@0.15.1 dshmarket@1.66.11"
+
+# 已被取代的包名。profile 是持久的，升级时旧条目会留在 bundles 与 node_modules
+# 里；覆盖安装后那个路径已不存在，每次启动都会报
+#   dsh: skipping profile bundle "<old>": cannot resolve ...
+# 所以这里显式清掉：软链、dependencies、bundles 三处一起。
+# dsh-remote-mobile 由 @yezack/dsh-remote-mobile 取代（同名包换成了 fork）。
+RETIRED="dsh-remote-mobile"
 
 for entry in $BUNDLES; do
   name="${entry%@*}"
@@ -36,14 +43,30 @@ for entry in $BUNDLES; do
   [ -d "$source_dir" ] || continue
   link="$MODULES/$name"
   mkdir -p "$(dirname "$link")"
-  [ -e "$link" ] || ln -s "$source_dir" "$link"
+  if [ -e "$link" ]; then
+    continue
+  fi
+  # 悬空软链（目标已被新安装移除）要替换掉，-e 对它是 false，所以单独判断。
+  if [ -L "$link" ]; then
+    rm -f "$link"
+  fi
+  ln -s "$source_dir" "$link"
+done
+
+# 退役名：先删软链，再由下面的 node 脚本从 manifest 里摘掉。
+for name in $RETIRED; do
+  link="$MODULES/$name"
+  [ -L "$link" ] && rm -f "$link"
 done
 
 mkdir -p "$PROFILE"
 MANIFEST="$PROFILE/package.json"
 "$NODE_BIN" -e '
 const fs = require("node:fs");
-const [file, ...entries] = process.argv.slice(1);
+const [file, ...rest] = process.argv.slice(1);
+// 最后一个参数是逗号分隔的退役名，前面都是 name@version。
+const retired = new Set((rest.pop() ?? "").split(",").filter((n) => n !== ""));
+const entries = rest;
 const plugins = entries.map((entry) => {
   const at = entry.lastIndexOf("@");
   return { name: entry.slice(0, at), version: entry.slice(at + 1) };
@@ -59,14 +82,18 @@ try {
 }
 manifest.private = true;
 manifest.dependencies = { ...manifest.dependencies };
+for (const retiredName of retired) delete manifest.dependencies[retiredName];
 for (const plugin of plugins) manifest.dependencies[plugin.name] = plugin.version;
 manifest.dsh = { ...manifest.dsh };
 manifest.dsh.profile = { ...manifest.dsh.profile };
-const bundles = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles.slice() : base.slice();
+const current = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles.slice() : base.slice();
+// 先摘掉退役名，再补齐当前清单。不摘的话旧条目会一直留在持久 profile 里，
+// 每次启动报一条 skipping profile bundle。
+const bundles = current.filter((name) => !retired.has(name));
 // 追加在末尾，让插件的 patch 层最后应用，可以覆盖基础层。
 for (const name of [...base, ...plugins.map((plugin) => plugin.name)]) {
   if (!bundles.includes(name)) bundles.push(name);
 }
 manifest.dsh.profile.bundles = bundles;
 fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
-' "$MANIFEST" $BUNDLES
+' "$MANIFEST" $BUNDLES "$(echo $RETIRED | tr ' ' ',')"
