@@ -55,14 +55,23 @@
   兼容层是幂等的，对现代浏览器只增加约 28KB 页面体积。
 
 预装插件与 chrome-devtools MCP
-  离线包已内置以下六个插件，首次启动即生效，无需联网安装：
+  离线包已内置以下十一个插件，首次启动即生效，无需联网安装。
+  这份清单与参考桌面 profile 的插件集一致（remote-mobile 用的是自维护 fork）：
 
-    dsh-capability-panel            1.4.0     能力面板
-    @michengai/dsh-archive-manager  1.0.15    压缩包管理
-    @lemoncat7/dsh-ssh              1.11.1    SSH 连接
-    @yezack/dsh-remote-mobile       1.9.0     远程与移动端接入（扫码配对，自维护 fork）
-    dsh-rewind-plugin               0.15.1    会话回退
-    dshmarket                       1.66.11   插件管理（启停 / 配置）
+    dsh-capability-panel                    1.4.0     能力面板
+    @lemoncat7/dsh-ssh                      1.11.2    SSH 连接
+    dsh-rewind-plugin                       0.15.3    会话回退
+    dsh-dream-skin                          10.16.0   主题皮肤
+    dsh-better-sidebar                      0.26.1    侧栏增强
+    @linxin666/dsh-client-ui-git-graph      0.4.6     Git 图
+    dsh-session-manager                     0.7.1     会话管理
+    @yezack/dsh-temp-workspace              0.2.1     临时工作区（自维护 fork）
+    @yezack/dsh-remote-mobile               1.9.0     远程与移动端接入（扫码配对，自维护 fork）
+    dshmarket                               1.66.28   插件管理（启停 / 配置）
+
+  注：旧版本包里的 @michengai/dsh-archive-manager 已不在清单内。profile 是持久的，
+  升级安装时它会由 seed-profile.sh 从 bundles / dependencies / node_modules 三处
+  一起摘掉，不需要手工清理。
 
   dshmarket 的离线边界：**插件的启停、配置、profile 编辑读的是本地状态，
   可以正常用**；但它的"从市场安装新插件"和"检查更新"需要访问 npm registry，
@@ -96,14 +105,22 @@
   打包好的客户端代码（插件没提供隐藏开关），补丁脚本是 patch-remote-mobile.mjs，
   锚点找不到时会直接让构建失败，不会静默跳过。局域网与扫码配对部分不受影响。
 
-  同一个补丁脚本还纠正一处发布缺陷：@yezack/dsh-remote-mobile 1.9.0 的
-  cordis.patch.yml 里 row 的 name 仍是上游的 'dsh-remote-mobile'，而 client-modules
-  会用 row 名做 require.resolve('<name>/package.json')，profile 里只有新包名，
-  旧名字解析不到就会 failed to import 并静默停用。脚本按 package.json 的实际包名
-  改写成 '@yezack/dsh-remote-mobile'。
+  同一个补丁脚本还纠正 @yezack/dsh-remote-mobile 1.9.0 的两处改名失配 —— 都是
+  把包名换成带 scope 的名字重新发布时会漏掉的：
 
-  该 fork 的 tarball 同样不在任何镜像上（npmjs 有、构建用的 npmmirror 没有），
-  所以也以 tarball 形式随包分发。
+  【1】cordis.patch.yml 里 row 的 name 仍是上游的 'dsh-remote-mobile'。client-modules
+      用 row 名做 require.resolve('<name>/package.json')，profile 里只有新包名，
+      旧名字解析不到，插件就 failed to import 并静默停用。
+
+  【2】lib/client.js 开头是 window.__ModuleLoader__.load({ id: "<打包时的包名>" })，
+      而模块表的键就是包名。两边失配时那个 id 永远拿不到 factory，浏览器里 import
+      失败，WebUI 启动页会把它列进 "Failed to load plugins" —— 这一条在服务端日志里
+      完全看不到，只能从浏览器 console 判断。
+
+  两处都按 package.json 的实际包名改写，锚点找不到时让构建失败而不是静默跳过。
+
+  该 fork 的 tarball 不在 npmmirror 上（npmjs 有），所以以 tarball 形式随包分发；
+  其余插件都在镜像上，按 name@version 从 registry 物化后冻结进 app.zip。
 
   它们被写进 web profile 的 bundle 模板，包体在 app/node_modules 里，
   因此目标机不需要 npm registry。某个包缺失时 DSH 会跳过并记录，不会启动失败。

@@ -28,14 +28,15 @@ MODULES="$PROFILE/node_modules"
 # 预装插件的唯一清单：name@version。软链、dependencies、bundles 三处都由它派生，
 # 避免清单写多份后漏改其中一处（dshmarket 那次就是漏改软链那一份）。
 # 与 packages/boot/app-boot/src/profile.ts 的 web 模板保持一致。
-BUNDLES="dsh-capability-panel@1.4.0 @michengai/dsh-archive-manager@1.0.15 @lemoncat7/dsh-ssh@1.11.1 @yezack/dsh-remote-mobile@1.9.0 dsh-rewind-plugin@0.15.1 dshmarket@1.66.11"
+BUNDLES="dsh-capability-panel@1.4.0 @lemoncat7/dsh-ssh@1.11.2 dshmarket@1.66.28 dsh-rewind-plugin@0.15.3 dsh-dream-skin@10.16.0 dsh-better-sidebar@0.26.1 @linxin666/dsh-client-ui-git-graph@0.4.6 dsh-session-manager@0.7.1 @yezack/dsh-temp-workspace@0.2.1 @yezack/dsh-remote-mobile@1.9.0"
 
 # 已被取代的包名。profile 是持久的，升级时旧条目会留在 bundles 与 node_modules
 # 里；覆盖安装后那个路径已不存在，每次启动都会报
 #   dsh: skipping profile bundle "<old>": cannot resolve ...
 # 所以这里显式清掉：软链、dependencies、bundles 三处一起。
-# dsh-remote-mobile 由 @yezack/dsh-remote-mobile 取代（同名包换成了 fork）。
-RETIRED="dsh-remote-mobile"
+#   dsh-remote-mobile          -> @yezack/dsh-remote-mobile（换成自维护 fork）
+#   @michengai/dsh-archive-manager -> 不在目标清单里，随本轮清单一起退役
+RETIRED="dsh-remote-mobile @michengai/dsh-archive-manager"
 
 for entry in $BUNDLES; do
   name="${entry%@*}"

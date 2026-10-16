@@ -181,7 +181,7 @@ export const PROFILE_TEMPLATES: Record<string, ProfileTemplate> = {
     bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-acp-app'],
   },
   web: {
-    // The six third-party bundles are part of this installation's offline
+    // The third-party bundles below are part of this installation's offline
     // image: the app ships them in its own `node_modules` and the offline
     // installer has no registry to add them from later. A host without them
     // skips them, because an unresolvable bundle is recorded and dropped rather
@@ -192,14 +192,24 @@ export const PROFILE_TEMPLATES: Record<string, ProfileTemplate> = {
     // useful - it exposes the shell to phones and other LAN devices, which
     // requires the webserver to leave loopback. That patch is deliberately not
     // written by the installer; see deploy/uos/README.txt.
+    //
+    // This list mirrors the plugin set of the reference desktop profile. Two
+    // entries are forks published under a scope: @yezack/dsh-remote-mobile and
+    // @yezack/dsh-temp-workspace. A scoped rename has to keep the bundle's row
+    // name and its client module id equal to the package name; see
+    // deploy/uos/patch-remote-mobile.mjs.
     bundles: [
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
       'dsh-capability-panel',
-      '@michengai/dsh-archive-manager',
       '@lemoncat7/dsh-ssh',
-      '@yezack/dsh-remote-mobile',
       'dsh-rewind-plugin',
+      'dsh-dream-skin',
+      'dsh-better-sidebar',
+      '@linxin666/dsh-client-ui-git-graph',
+      'dsh-session-manager',
+      '@yezack/dsh-temp-workspace',
+      '@yezack/dsh-remote-mobile',
       'dshmarket',
     ],
   },
