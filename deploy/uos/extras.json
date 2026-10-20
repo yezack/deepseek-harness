@@ -5,8 +5,10 @@
   { "name": "dsh-rewind-plugin", "version": "0.17.1" },
   { "name": "dsh-dream-skin", "version": "10.16.0" },
   { "name": "dsh-better-sidebar", "version": "0.28.0" },
+  { "name": "dsh-better-workspace", "version": "0.32.2" },
   { "name": "@linxin666/dsh-client-ui-git-graph", "version": "0.4.8" },
   { "name": "dsh-session-manager", "version": "0.7.3" },
+  { "name": "dsh-univer-office", "version": "0.3.7" },
   { "name": "@yezack/dsh-temp-workspace", "version": "0.2.2" },
   { "name": "@yezack/dsh-remote-mobile", "spec": "file:extras/yezack-dsh-remote-mobile-1.9.2.tgz" },
   {

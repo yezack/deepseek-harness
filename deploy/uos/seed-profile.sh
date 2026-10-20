@@ -28,7 +28,7 @@ MODULES="$PROFILE/node_modules"
 # 预装插件的唯一清单：name@version。软链、dependencies、bundles 三处都由它派生，
 # 避免清单写多份后漏改其中一处（dshmarket 那次就是漏改软链那一份）。
 # 与 packages/boot/app-boot/src/profile.ts 的 web 模板保持一致。
-BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.4 dshmarket@1.66.44 dsh-rewind-plugin@0.17.1 dsh-dream-skin@10.16.0 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.3 @yezack/dsh-temp-workspace@0.2.2 @yezack/dsh-remote-mobile@1.9.2"
+BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.4 dshmarket@1.66.44 dsh-rewind-plugin@0.17.1 dsh-dream-skin@10.16.0 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.3 dsh-better-workspace@0.32.2 dsh-univer-office@0.3.7 @yezack/dsh-temp-workspace@0.2.2 @yezack/dsh-remote-mobile@1.9.2"
 
 # 预装但默认禁用的插件。它们装进 node_modules 与 bundles，由 profile 的
 # cordis.patch.yml 关掉，这样操作员要用的那天在设置里打开即可，不必重装。
@@ -142,3 +142,46 @@ fs.mkdirSync(require("node:path").dirname(file), { recursive: true });
 fs.writeFileSync(file, next.trimEnd() + "\n");
 console.log("[seed-profile] 默认禁用:", disabled.length === 0 ? "（无）" : disabled.join(", "));
 ' "$PATCH" "$BEGIN_MARK" "$END_MARK" "$(echo $DISABLED | tr ' ' ',')"
+
+# 渲染浏览器路径。dsh-univer-office 的截图 / print_pdf / unit_layout_lint 需要一个
+# Chromium 内核浏览器，但它自己的探测只认少数硬编码路径：Windows 上是 Program
+# Files 下的 Chrome 与 Edge，Linux 上是 /usr/bin/google-chrome 之类。公安镜像上
+# 那个浏览器是 /usr/bin/browser360ent-cn-stable，两边都探测不到，于是报
+# UNIVER_RENDER_BROWSER_UNAVAILABLE。
+#
+# browserExecutablePath 优先于任何自动探测，所以这里用与 chrome-devtools MCP 行
+# 完全相同的表达式，让整个部署只有一个浏览器路径 —— 换机器时改 DSH_CHROME_PATH
+# 即可，不必动 profile。
+RENDER_BEGIN="# >>> dsh-offline: render browser"
+RENDER_END="# <<< dsh-offline: render browser"
+
+"$NODE_BIN" -e '
+const fs = require("node:fs");
+const [file, beginMark, endMark] = process.argv.slice(1);
+const block = [
+  beginMark,
+  "# 由 seed-profile.sh 维护：univer 的渲染浏览器，与 chrome-devtools MCP 同一个。",
+  "# 需要换浏览器时改 start-web.sh 里的 DSH_CHROME_PATH，这里会自动跟随。",
+  "- id: univer",
+  "  config:",
+  "    browserExecutablePath: !!js process.env.DSH_CHROME_PATH ?? \x27/usr/bin/browser\x27",
+  endMark,
+].join("\n");
+let current = "";
+try {
+  current = fs.readFileSync(file, "utf8");
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+const beginAt = current.indexOf(beginMark);
+const endAt = current.indexOf(endMark);
+let next;
+if (beginAt !== -1 && endAt > beginAt) {
+  next = current.slice(0, beginAt) + block + current.slice(endAt + endMark.length);
+} else {
+  next = current.trimEnd() === "" ? block : current.trimEnd() + "\n\n" + block;
+}
+fs.mkdirSync(require("node:path").dirname(file), { recursive: true });
+fs.writeFileSync(file, next.trimEnd() + "\n");
+console.log("[seed-profile] 渲染浏览器: DSH_CHROME_PATH");
+' "$PATCH" "$RENDER_BEGIN" "$RENDER_END"
