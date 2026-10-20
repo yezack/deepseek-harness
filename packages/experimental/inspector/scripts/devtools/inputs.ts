@@ -1,4 +1,5 @@
 /** Immutable npm source discovery and generated frontend build inputs. */
+import { realpathSync } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -6,6 +7,13 @@ import { DEVTOOLS_NPM_VERSION } from './source.ts'
 
 /**
  * Resolve the installed, exact frontend source version without network access.
+ *
+ * The result is the package's real path, not the path the resolver reported.
+ * A package manager that links a dependency (junction on Windows, symlink on
+ * POSIX) hands back the link's path, while `vite.ts` compares the resolved
+ * importer against this root with `relative()`. A link root and a real importer
+ * share no prefix, so every generated module lookup missed and the frontend
+ * build failed on the modules supplied at build time rather than by npm.
  * @returns The immutable npm package directory.
  */
 export async function frontendSourceRoot(): Promise<string> {
@@ -14,7 +22,7 @@ export async function frontendSourceRoot(): Promise<string> {
   if (typeof manifest !== 'object' || manifest === null || !('version' in manifest) || manifest.version !== DEVTOOLS_NPM_VERSION) {
     throw new Error(`Expected chrome-devtools-frontend ${DEVTOOLS_NPM_VERSION}`)
   }
-  return dirname(file)
+  return realpathSync.native(dirname(file))
 }
 
 /**
