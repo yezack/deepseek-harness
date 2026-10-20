@@ -207,6 +207,8 @@ export const PROFILE_TEMPLATES: Record<string, ProfileTemplate> = {
       'dsh-better-sidebar',
       '@linxin666/dsh-client-ui-git-graph',
       'dsh-session-manager',
+      'dsh-better-workspace',
+      'dsh-univer-office',
       '@yezack/dsh-temp-workspace',
       '@yezack/dsh-remote-mobile',
       'dshmarket',

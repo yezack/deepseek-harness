@@ -7,7 +7,7 @@
   { "name": "dsh-better-sidebar", "version": "0.28.0" },
   { "name": "@linxin666/dsh-client-ui-git-graph", "version": "0.4.8" },
   { "name": "dsh-session-manager", "version": "0.7.3" },
-  { "name": "@yezack/dsh-temp-workspace", "version": "0.2.1" },
+  { "name": "@yezack/dsh-temp-workspace", "version": "0.2.2" },
   { "name": "@yezack/dsh-remote-mobile", "spec": "file:extras/yezack-dsh-remote-mobile-1.9.2.tgz" },
   {
     "name": "@yezack/chrome-devtools-mcp-108",

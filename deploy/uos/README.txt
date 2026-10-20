@@ -65,7 +65,7 @@
     dsh-better-sidebar                      0.28.0    侧栏增强
     @linxin666/dsh-client-ui-git-graph      0.4.8     Git 图
     dsh-session-manager                     0.7.3     会话管理
-    @yezack/dsh-temp-workspace              0.2.1     临时工作区（自维护 fork）
+    @yezack/dsh-temp-workspace              0.2.2     临时工作区（自维护 fork）
     @yezack/dsh-remote-mobile               1.9.2     远程与移动端接入（扫码配对，自维护 fork）
     dshmarket                               1.66.44   插件管理（启停 / 配置）
 

@@ -28,7 +28,7 @@ MODULES="$PROFILE/node_modules"
 # 预装插件的唯一清单：name@version。软链、dependencies、bundles 三处都由它派生，
 # 避免清单写多份后漏改其中一处（dshmarket 那次就是漏改软链那一份）。
 # 与 packages/boot/app-boot/src/profile.ts 的 web 模板保持一致。
-BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.4 dshmarket@1.66.44 dsh-rewind-plugin@0.17.1 dsh-dream-skin@10.16.0 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.3 @yezack/dsh-temp-workspace@0.2.1 @yezack/dsh-remote-mobile@1.9.2"
+BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.4 dshmarket@1.66.44 dsh-rewind-plugin@0.17.1 dsh-dream-skin@10.16.0 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.3 @yezack/dsh-temp-workspace@0.2.2 @yezack/dsh-remote-mobile@1.9.2"
 
 # 预装但默认禁用的插件。它们装进 node_modules 与 bundles，由 profile 的
 # cordis.patch.yml 关掉，这样操作员要用的那天在设置里打开即可，不必重装。
