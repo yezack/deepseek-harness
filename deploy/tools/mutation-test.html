@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>compat mutation cost</title>
+</head>
+<body>
+<div id="target" class="c0">x</div>
+<div id="list"></div>
+<script>
+/* Build a stylesheet at the scale the shell actually reaches: many
+   color-mix declarations over a handful of shared tokens. */
+const tokens = ['--t0', '--t1', '--t2', '--t3', '--t4', '--t5']
+const vars = tokens.map((t, i) => `${t}: hsl(${i * 37} 60% 50%);`).join(' ')
+let css = `:root { ${vars} }`
+for (let i = 0; i < 150; i += 1) {
+  css += `.r${i}{background-color:color-mix(in srgb, var(${tokens[i % 6]}) ${5 + (i % 40)}%, transparent);`
+    + `border-top:1px solid color-mix(in srgb, var(${tokens[(i + 2) % 6]}) 24%, transparent);}\n`
+}
+const sheet = document.createElement('style')
+sheet.textContent = css
+document.head.appendChild(sheet)
+
+/* Force the fallback exactly as a kernel without color-mix() would. */
+const realSupports = CSS.supports.bind(CSS)
+CSS.supports = (a, b) => {
+  const value = b === undefined ? String(a) : String(b)
+  return value.includes('color-mix') ? false : realSupports(a, b)
+}
+
+window.__run = async () => {
+  await new Promise(resolve => {
+    const s = document.createElement('script')
+    s.src = 'compat-standalone.js'
+    s.onload = resolve
+    document.head.appendChild(s)
+  })
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+
+  const stats = window.__DSH_WEB_COMPAT_STATS__
+  if (!stats) return { error: 'stats 未暴露' }
+  const before = { passes: stats.passes, rewritten: stats.rewritten, lastPassMs: stats.lastPassMs }
+  const declared = document.styleSheets[0].cssRules[0].style.getPropertyValue('background-color') || ''
+  const sample = (() => {
+    const rule = [...document.styleSheets[0].cssRules].find(r => r.selectorText === '.r0')
+    return rule ? rule.style.getPropertyValue('background-color') : ''
+  })()
+
+  /* React-like workload: touch a class attribute and add/remove a node every
+     frame, which is what an interactive shell does continuously. */
+  const started = performance.now()
+  let frames = 0
+  await new Promise(resolve => {
+    const tick = () => {
+      document.getElementById('target').className = 'c' + (frames % 4)
+      const list = document.getElementById('list')
+      if (list.childElementCount > 3) list.removeChild(list.firstElementChild)
+      else list.appendChild(document.createElement('span'))
+      frames += 1
+      if (performance.now() - started < 2000) requestAnimationFrame(tick)
+      else resolve()
+    }
+    requestAnimationFrame(tick)
+  })
+
+  return {
+    rules: document.styleSheets[0].cssRules.length,
+    framesTouched: frames,
+    passesBeforeWorkload: before.passes,
+    passesAfterWorkload: stats.passes,
+    passesDuringWorkload: stats.passes - before.passes,
+    declarationsRewrittenFirstPass: before.rewritten,
+    lastPassMs: stats.lastPassMs,
+    firstRuleStillColorMix: declared.indexOf('color-mix(') !== -1,
+    r0RewrittenTo: sample.slice(0, 60),
+  }
+}
+</script>
+</body>
+</html>

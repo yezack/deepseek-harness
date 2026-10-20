@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>color-mix differential test</title>
+<style id="theme">
+  :root {
+    --tok: #336699;
+    --tok2: rgb(200, 100, 50);
+    --alias: var(--tok);
+    --mixed-token: color-mix(in srgb, var(--tok) 30%, transparent);
+  }
+  /* The engine computes each declaration natively first; the compat pass then
+     rewrites the same declarations. Identical results prove the fallback. */
+  #p1 { background-color: color-mix(in srgb, var(--tok) 50%, transparent); }
+  #p2 { background-color: color-mix(in srgb, var(--tok2) 25%, white); }
+  #p3 { background-color: color-mix(in srgb, #ff0000, #0000ff); }
+  #p4 { background-color: color-mix(in srgb, var(--tok) 12%, transparent); }
+  #p5 { background-color: color-mix(in srgb, color-mix(in srgb, var(--tok) 50%, white) 40%, transparent); }
+  #p6 { background-color: color-mix(in srgb, var(--alias) 40%, transparent); }
+  #p7 { background-color: var(--mixed-token); }
+  #p8 { border-top: 3px solid color-mix(in srgb, var(--tok) 24%, transparent); }
+  #p9 { background-color: color-mix(in srgb, var(--tok2) 30%, var(--tok) 30%); }
+  #p10 { background-color: color-mix(in srgb, rgba(255, 0, 0, 0.25), transparent); }
+  #p11 { background-color: color-mix(in srgb, var(--tok2) 75%, white 75%); }
+  #p12 { background-color: color-mix(in srgb, var(--tok) 20%, white); }
+  #p13 { background-color: color-mix(in srgb, var(--tok) 0%, transparent); }
+  .probe { width: 8px; height: 8px; }
+</style>
+</head>
+<body>
+<div id="p1" class="probe"></div>
+<div id="p2" class="probe"></div>
+<div id="p3" class="probe"></div>
+<div id="p4" class="probe"></div>
+<div id="p5" class="probe"></div>
+<div id="p6" class="probe"></div>
+<div id="p7" class="probe"></div>
+<div id="p8" class="probe"></div>
+<div id="p9" class="probe"></div>
+<div id="p10" class="probe"></div>
+<div id="p11" class="probe"></div>
+<div id="p12" class="probe"></div>
+<div id="p13" class="probe"></div>
+
+<script>
+window.__runCssTest = async function () {
+  const ids = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9', 'p10', 'p11', 'p12', 'p13']
+  const declaredName = { p8: 'border-top' }
+  const computedName = { p8: 'borderTopColor' }
+  const read = function (id) {
+    const element = document.getElementById(id)
+    return getComputedStyle(element)[computedName[id] || 'backgroundColor']
+  }
+  /* Read the declaration the engine actually holds, so the test can prove the
+     compat pass rewrote it instead of merely agreeing with an untouched value. */
+  const declared = function (id, name) {
+    const seen = []
+    const walk = function (rules) {
+      for (const rule of rules) {
+        if (rule.selectorText !== undefined && rule.style !== undefined) {
+          if (rule.selectorText.split(',').some(function (s) { return s.trim() === '#' + id })) {
+            seen.push(rule.style.getPropertyValue(name))
+          }
+        }
+        if (rule.cssRules !== undefined) walk(rule.cssRules)
+      }
+    }
+    for (const sheet of document.styleSheets) {
+      try { walk(sheet.cssRules) } catch (error) { void error }
+    }
+    return seen.join(' | ')
+  }
+
+  /* Chrome serializes a color-mix result as color(srgb r g b / a) and a plain
+     literal as rgb()/rgba(), so the comparison must be numeric. */
+  const canonical = function (text) {
+    const legacy = /^rgba?\(([^)]+)\)$/.exec(text)
+    if (legacy !== null) {
+      const p = legacy[1].split(/[\s,/]+/).filter(function (x) { return x !== '' })
+      return [parseFloat(p[0]), parseFloat(p[1]), parseFloat(p[2]), p.length > 3 ? parseFloat(p[3]) : 1]
+    }
+    const wide = /^color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+))?\)$/.exec(text)
+    if (wide !== null) {
+      return [Number(wide[1]) * 255, Number(wide[2]) * 255, Number(wide[3]) * 255, wide[4] === undefined ? 1 : Number(wide[4])]
+    }
+    return null
+  }
+  const sameColor = function (left, right) {
+    const a = canonical(left)
+    const b = canonical(right)
+    if (a === null || b === null) return left === right
+    for (let i = 0; i < 3; i++) if (Math.abs(a[i] - b[i]) > 1.2) return false
+    return Math.abs(a[3] - b[3]) <= 0.002
+  }
+
+  const nativeSupported = CSS.supports('color', 'color-mix(in srgb, red, blue)')
+  const native = {}
+  const beforeDeclared = {}
+  for (const id of ids) {
+    native[id] = read(id)
+    beforeDeclared[id] = declared(id, declaredName[id] || 'background-color')
+  }
+
+  /* Force the fallback path: report color-mix as unsupported while leaving the
+     engine's own color-mix rendering intact for the baseline above. */
+  const realSupports = CSS.supports.bind(CSS)
+  CSS.supports = function (first, second) {
+    const value = second === undefined ? String(first) : String(second)
+    if (value.indexOf('color-mix') !== -1) return false
+    return realSupports(first, second)
+  }
+
+  const loaded = await new Promise(function (resolve) {
+    const element = document.createElement('script')
+    element.src = 'compat-standalone.js'
+    element.onload = function () { resolve('loaded') }
+    element.onerror = function () { resolve('error') }
+    document.head.appendChild(element)
+  })
+  await new Promise(function (r) { requestAnimationFrame(function () { requestAnimationFrame(r) }) })
+
+  const results = []
+  for (const id of ids) {
+    const after = read(id)
+    const afterDeclared = declared(id, declaredName[id] || 'background-color')
+    results.push({
+      id: id,
+      native: native[id],
+      after: after,
+      match: sameColor(native[id], after),
+      declaredBefore: beforeDeclared[id],
+      declaredAfter: afterDeclared,
+      rewrote: beforeDeclared[id].indexOf('color-mix(') !== -1 && afterDeclared.indexOf('color-mix(') === -1,
+    })
+  }
+  return {
+    engineSupportsColorMix: nativeSupported,
+    scriptLoad: loaded,
+    marker: window.__DSH_WEB_COMPAT__ === true,
+    rewrittenCount: results.filter(function (row) { return row.rewrote }).length,
+    mismatchCount: results.filter(function (row) { return !row.match }).length,
+    results: results,
+  }
+}
+</script>
+</body>
+</html>
