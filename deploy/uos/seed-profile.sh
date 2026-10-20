@@ -28,7 +28,12 @@ MODULES="$PROFILE/node_modules"
 # 预装插件的唯一清单：name@version。软链、dependencies、bundles 三处都由它派生，
 # 避免清单写多份后漏改其中一处（dshmarket 那次就是漏改软链那一份）。
 # 与 packages/boot/app-boot/src/profile.ts 的 web 模板保持一致。
-BUNDLES="dsh-capability-panel@1.4.0 @lemoncat7/dsh-ssh@1.11.2 dshmarket@1.66.28 dsh-rewind-plugin@0.15.3 dsh-dream-skin@10.16.0 dsh-better-sidebar@0.26.1 @linxin666/dsh-client-ui-git-graph@0.4.6 dsh-session-manager@0.7.1 @yezack/dsh-temp-workspace@0.2.1 @yezack/dsh-remote-mobile@1.9.0"
+BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.4 dshmarket@1.66.44 dsh-rewind-plugin@0.17.1 dsh-dream-skin@10.16.0 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.3 @yezack/dsh-temp-workspace@0.2.1 @yezack/dsh-remote-mobile@1.9.2"
+
+# 预装但默认禁用的插件。它们装进 node_modules 与 bundles，由 profile 的
+# cordis.patch.yml 关掉，这样操作员要用的那天在设置里打开即可，不必重装。
+#   dsh-dream-skin 会替换整个外观；首次部署先保持 DSH 内置外观。
+DISABLED="dream-skin"
 
 # 已被取代的包名。profile 是持久的，升级时旧条目会留在 bundles 与 node_modules
 # 里；覆盖安装后那个路径已不存在，每次启动都会报
@@ -98,3 +103,42 @@ for (const name of [...base, ...plugins.map((plugin) => plugin.name)]) {
 manifest.dsh.profile.bundles = bundles;
 fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
 ' "$MANIFEST" $BUNDLES "$(echo $RETIRED | tr ' ' ',')"
+
+# 默认禁用列表写进 profile 的 cordis.patch.yml。这段是本脚本独占的标记块：
+# 每次替换自己那一段，其余内容（操作员手写的 webserver 覆盖等）原样保留。
+# 标记块可以随手删掉，删了就等于全部启用。
+PATCH="$PROFILE/cordis.patch.yml"
+BEGIN_MARK="# >>> dsh-offline: default-disabled plugins"
+END_MARK="# <<< dsh-offline: default-disabled plugins"
+
+"$NODE_BIN" -e '
+const fs = require("node:fs");
+const [file, beginMark, endMark, names] = process.argv.slice(1);
+const disabled = names.split(",").filter((n) => n !== "");
+const block = [
+  beginMark,
+  "# 由 seed-profile.sh 维护：列在这里的插件装好了但默认不启用。",
+  "# 需要时删掉整块（或其中一项）再重启即可。",
+  ...disabled.flatMap((id) => [`- id: ${id}`, "  disabled: true"]),
+  endMark,
+].join("\n");
+let current = "";
+try {
+  current = fs.readFileSync(file, "utf8");
+} catch (error) {
+  // 首次启动：profile 还没有 patch 文件。
+  if (error.code !== "ENOENT") throw error;
+}
+const beginAt = current.indexOf(beginMark);
+const endAt = current.indexOf(endMark);
+let next;
+if (beginAt !== -1 && endAt > beginAt) {
+  // 替换已有块，保留块前块后的内容。
+  next = current.slice(0, beginAt) + block + current.slice(endAt + endMark.length);
+} else {
+  next = current.trimEnd() === "" ? block : current.trimEnd() + "\n\n" + block;
+}
+fs.mkdirSync(require("node:path").dirname(file), { recursive: true });
+fs.writeFileSync(file, next.trimEnd() + "\n");
+console.log("[seed-profile] 默认禁用:", disabled.length === 0 ? "（无）" : disabled.join(", "));
+' "$PATCH" "$BEGIN_MARK" "$END_MARK" "$(echo $DISABLED | tr ' ' ',')"
