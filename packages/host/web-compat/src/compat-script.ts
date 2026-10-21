@@ -96,6 +96,35 @@ const COMPAT_SCRIPT_SOURCE = String.raw`(function () {
     })
   }
 
+  if (typeof g.AbortSignal !== 'undefined' && typeof g.AbortSignal.prototype !== 'undefined') {
+    /* Chrome 98-. The getter cannot replay a custom abort reason on engines
+    without one; it always synthesizes an AbortError so `throwIfAborted` and
+    `signal.reason` readers keep working. */
+    if (!Object.getOwnPropertyDescriptor(g.AbortSignal.prototype, 'reason')) {
+      try {
+        Object.defineProperty(g.AbortSignal.prototype, 'reason', {
+          configurable: true,
+          get: function () {
+            if (!this.aborted) return undefined
+            var failure
+            try { failure = new g.DOMException('The operation was aborted.', 'AbortError') }
+            catch (error) { failure = new Error('The operation was aborted.'); failure.name = 'AbortError' }
+            return failure
+          },
+        })
+      } catch (error) {
+        /* A non-configurable seat keeps whatever it already provides. */
+      }
+    }
+    /* Chrome 96-. The API gateway client calls this on every RPC signal. */
+    if (typeof g.AbortSignal.prototype.throwIfAborted !== 'function') {
+      define(g.AbortSignal.prototype, 'throwIfAborted', function throwIfAborted() {
+        if (!this.aborted) return
+        throw this.reason
+      })
+    }
+  }
+
   if (typeof g.structuredClone !== 'function') {
     /* A JSON round-trip would corrupt the binary and keyed values the client
     passes through here (attachments, caches), so the fallback walks the graph. */

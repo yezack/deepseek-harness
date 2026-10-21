@@ -46,6 +46,8 @@ Installed only when missing, so a current browser runs none of them.
 | `Promise.withResolvers` | Chrome 119 |
 | `AbortSignal.any` | Chrome 116 |
 | `AbortSignal.timeout` | Chrome 103 |
+| `AbortSignal.prototype.throwIfAborted` | Chrome 96 |
+| `AbortSignal.prototype.reason` | Chrome 98 |
 | `structuredClone` | Chrome 98 |
 | `Object.hasOwn` | Chrome 93 |
 | `Object.groupBy` / `Map.groupBy` | Chrome 117 |
