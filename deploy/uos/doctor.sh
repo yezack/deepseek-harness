@@ -184,14 +184,34 @@ if [ -f "$PATCH" ]; then
   if [ -z "$KNOWN" ]; then
     skip "无法枚举已知 entry，跳过孤儿行检查"
   else
-    ORPHANS="$(grep -E '^\s*-\s*id:' "$PATCH" | sed -E 's/^\s*-\s*id:\s*//; s/\s.*//' | while read -r id; do
-      [ -z "$id" ] && continue
-      printf '%s\n' "$KNOWN" | grep -qxF "$id" || echo "$id"
-    done)"
+    ORPHANS="$("$NODE_BIN" -e '
+const fs = require("node:fs")
+const [patchFile, knownFile] = process.argv.slice(1)
+const text = fs.readFileSync(patchFile, "utf8")
+const known = new Set((fs.existsSync(knownFile) ? fs.readFileSync(knownFile, "utf8") : "").split("\n").map((s) => s.trim()).filter(Boolean))
+const lines = text.split("\n")
+// insert: 块内的 - id 行定义新 entry（例如模型配置），不是孤儿。
+const stack = []
+const suspicious = []
+for (let i = 0; i < lines.length; i += 1) {
+  const raw = lines[i]
+  const trimmed = raw.trim()
+  if (trimmed === "" || trimmed.startsWith("#")) continue
+  const indent = raw.search(/\S/u)
+  while (stack.length > 0 && indent <= stack[stack.length - 1]) stack.pop()
+  if (/^-?\s*insert:/u.test(trimmed)) { stack.push(indent); continue }
+  const m = /^-\s*id:\s*(\S+)/u.exec(trimmed)
+  if (m === null) continue
+  if (stack.length > 0) continue
+  if (known.has(m[1])) continue
+  suspicious.push(m[1])
+}
+if (suspicious.length > 0) console.log(suspicious.join(" "))
+' "$PATCH" "$PROFILE_HOME/cordis.yml" 2>/dev/null)"
     if [ -n "$ORPHANS" ]; then
-      warn "孤儿 patch 行（没有 bundle 或 cordis.yml 提供该 entry）: $(echo "$ORPHANS" | tr '\n' ' ')"
+      warn "可疑 patch 行（没有 bundle/cordis.yml 提供该 entry，仅供核对，不会被自动删除）: $(echo "$ORPHANS" | tr '\n' ' ')"
     else
-      ok "没有孤儿 patch 行"
+      ok "没有可疑 patch 行"
     fi
   fi
   if "$NODE_BIN" -e '

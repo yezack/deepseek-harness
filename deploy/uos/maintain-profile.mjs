@@ -124,12 +124,14 @@ for (const block of BLOCKS) {
   moved += foreign.length
 }
 
-// 【A1】删除指向不存在 entry 的孤儿行（不动本包维护块内的行）。
+// 【A1】孤儿行的**检测**（只提示，不删除）。
 //
-// "存在"的判定不能只看 profile 的 cordis.yml：绝大多数 entry 是**各 bundle 的
-// cordis.patch.yml 在加载时插入**的（webserver、univer、dream-skin 都不在
-// cordis.yml 文本里）。只按 cordis.yml 判会把合法行当孤儿删掉 —— 实测踩过。
-// 因此把 app/node_modules 下所有 bundle patch 的 `- id:` 一并算作已知 id。
+// 教训：早先版本会直接删掉"没有 bundle 或 cordis.yml 提供该 entry"的行，结果把
+// 用户通过 `insert:` 新增的模型条目（例如 qwen38-flash-next）当成孤儿删了 ——
+// 每次重启模型配置就没了。patch 行有两种用途：
+//   1. 修改已存在的 entry（cordis.yml 或 bundle patch 里能查到 id）
+//   2. `insert:` 新增 entry（cordis.yml 里本来就没有，属于合法配置）
+// 判定必须区分这两类；而且用户配置宁可留错也不可误删，所以这里只打印提示。
 function collectKnownIds(dest) {
   const known = new Set()
   const readPatch = (file) => {
@@ -161,6 +163,25 @@ function collectKnownIds(dest) {
   return known
 }
 
+/** 标记出属于 `insert:` 块的 `- id:` 行（它们定义新 entry，不是孤儿）。 */
+function collectInsertedRows(lines) {
+  const inserted = new Set()
+  const stack = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index]
+    const trimmed = raw.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    const indent = raw.search(/\S/u)
+    while (stack.length > 0 && indent <= stack[stack.length - 1]) stack.pop()
+    if (/^-?\s*insert:/u.test(trimmed)) {
+      stack.push(indent)
+      continue
+    }
+    if (/^-\s*id:/u.test(trimmed) && stack.length > 0) inserted.add(index)
+  }
+  return inserted
+}
+
 let knownIds = null
 try {
   knownIds = collectKnownIds(dest)
@@ -183,20 +204,20 @@ if (knownIds !== null && knownIds.size > 0) {
     if (found === null) continue
     for (let index = found.beginAt; index <= found.endAt; index += 1) inManaged.add(index)
   }
-  const orphans = []
+  const insertedRows = collectInsertedRows(lines)
+  const suspicious = []
   const rows = partition(0, lines.length)
   for (const row of rows) {
     const id = rowIdOf(lines[row.start])
     if (id === null) continue
     if (inManaged.has(row.start)) continue
+    if (insertedRows.has(row.start)) continue
     if (BLOCKS.some((block) => block.owned.has(id))) continue
     if (knownIds.has(id)) continue
-    orphans.push({ id, start: row.start, end: row.end })
+    suspicious.push(id)
   }
-  for (const row of orphans.reverse()) {
-    lines.splice(row.start, row.end - row.start)
-    console.log(`[maintain-profile] 删除孤儿 patch 行: ${row.id}（没有 bundle 或 cordis.yml 提供该 entry）`)
-    removed += 1
+  if (suspicious.length > 0) {
+    console.log(`[maintain-profile] 提示: ${suspicious.length} 个 patch 行可能指向不存在的 entry（未改动，需要时请手动清理）: ${suspicious.join(', ')}`)
   }
 } else {
   console.log('[maintain-profile] 无法枚举已知 entry（bundle patch 扫描失败），跳过孤儿行检查')
@@ -237,6 +258,6 @@ if (changed) {
   fs.writeFileSync(tmp, next)
   fs.renameSync(tmp, file)
 }
-if (moved === 0 && removed === 0) {
-  console.log('[maintain-profile] 配置卫生检查通过（无孤儿行、无块内外来行）')
+if (moved === 0) {
+  console.log('[maintain-profile] 配置卫生检查通过（标记块内无外来行；孤儿行只提示不删除）')
 }
