@@ -28,7 +28,7 @@ MODULES="$PROFILE/node_modules"
 # 预装插件的唯一清单：name@version。软链、dependencies、bundles 三处都由它派生，
 # 避免清单写多份后漏改其中一处（dshmarket 那次就是漏改软链那一份）。
 # 与 packages/boot/app-boot/src/profile.ts 的 web 模板保持一致。
-BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.4 dshmarket@1.66.44 dsh-rewind-plugin@0.17.1 dsh-dream-skin@10.16.0 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.3 dsh-better-workspace@0.32.2 dsh-univer-office@0.3.7 @yezack/dsh-temp-workspace@0.2.2 @yezack/dsh-remote-mobile@1.9.2"
+BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.5 dshmarket@1.66.47 dsh-rewind-plugin@0.18.0 dsh-dream-skin@10.21.2 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.4 dsh-better-workspace@0.35.1 @yezack/dsh-univer-office@0.3.8 @yezack/dsh-temp-workspace@0.2.4 @yezack/dsh-remote-mobile@1.9.2"
 
 # 预装但默认禁用的插件。它们装进 node_modules 与 bundles，由 profile 的
 # cordis.patch.yml 关掉，这样操作员要用的那天在设置里打开即可，不必重装。
@@ -41,7 +41,7 @@ DISABLED="dream-skin"
 # 所以这里显式清掉：软链、dependencies、bundles 三处一起。
 #   dsh-remote-mobile          -> @yezack/dsh-remote-mobile（换成自维护 fork）
 #   @michengai/dsh-archive-manager -> 不在目标清单里，随本轮清单一起退役
-RETIRED="dsh-remote-mobile @michengai/dsh-archive-manager"
+RETIRED="dsh-remote-mobile @michengai/dsh-archive-manager dsh-univer-office"
 
 for entry in $BUNDLES; do
   name="${entry%@*}"
@@ -143,6 +143,31 @@ fs.writeFileSync(file, next.trimEnd() + "\n");
 console.log("[seed-profile] 默认禁用:", disabled.length === 0 ? "（无）" : disabled.join(", "));
 ' "$PATCH" "$BEGIN_MARK" "$END_MARK" "$(echo $DISABLED | tr ' ' ',')"
 
+# 迁移：0.2.1 起 webserver 拒绝通配绑定（0.0.0.0 / ::），schemas 校验直接报
+# "unspecified (wildcard) address" 并让启动失败 —— 而 profile 是持久的，旧部署
+# （0.2.0 时代的 README 教人写 host: 0.0.0.0）升级安装后会原样留着，于是老机器
+# 全部起不来。这里每次启动前只改 webserver 那一段的 host，改完打一行日志。
+"$NODE_BIN" -e '
+const fs = require("node:fs");
+const file = process.argv[1];
+let current;
+try { current = fs.readFileSync(file, "utf8"); } catch (error) { if (error.code === "ENOENT") process.exit(0); throw error; }
+const lines = current.split("\n");
+let inWebserver = false;
+let changed = false;
+for (let index = 0; index < lines.length; index += 1) {
+  const idMatch = /^\s*-\s*id:\s*(\S+)/.exec(lines[index]);
+  if (idMatch) { inWebserver = idMatch[1] === "webserver"; continue; }
+  if (!inWebserver) continue;
+  const hostMatch = /^(\s*host:\s*)["\x27]?(0\.0\.0\.0|::)["\x27]?\s*$/.exec(lines[index]);
+  if (hostMatch) { lines[index] = hostMatch[1] + "\x27127.0.0.1\x27"; changed = true; }
+}
+if (!changed) process.exit(0);
+fs.writeFileSync(file, lines.join("\n"));
+console.log("[seed-profile] webserver 通配绑定已改为 127.0.0.1（0.2.1 拒绝 0.0.0.0）");
+console.log("[seed-profile]   要同时对外服务：sudo " + process.argv[2] + "/enable-lan.sh");
+' "$PATCH" "$DEST"
+
 # 渲染浏览器路径。dsh-univer-office 的截图 / print_pdf / unit_layout_lint 需要一个
 # Chromium 内核浏览器，但它自己的探测只认少数硬编码路径：Windows 上是 Program
 # Files 下的 Chrome 与 Edge，Linux 上是 /usr/bin/google-chrome 之类。公安镜像上
@@ -152,6 +177,11 @@ console.log("[seed-profile] 默认禁用:", disabled.length === 0 ? "（无）" 
 # browserExecutablePath 优先于任何自动探测，所以这里用与 chrome-devtools MCP 行
 # 完全相同的表达式，让整个部署只有一个浏览器路径 —— 换机器时改 DSH_CHROME_PATH
 # 即可，不必动 profile。
+#
+# 注意：两个消费者是**两条独立的配置行**（univer 的 browserExecutablePath 与
+# web-app 模板里的 mcp-chrome-devtools 行），只是都读 DSH_CHROME_PATH 这个环境
+# 变量。若绕过 start-web.sh 直接跑 bin.js，该变量未设，两边都会回落到
+# /usr/bin/browser（老内核），排查时容易误判成"配置没生效"。
 RENDER_BEGIN="# >>> dsh-offline: render browser"
 RENDER_END="# <<< dsh-offline: render browser"
 
@@ -160,7 +190,8 @@ const fs = require("node:fs");
 const [file, beginMark, endMark] = process.argv.slice(1);
 const block = [
   beginMark,
-  "# 由 seed-profile.sh 维护：univer 的渲染浏览器，与 chrome-devtools MCP 同一个。",
+  "# 由 seed-profile.sh 维护：univer 的渲染浏览器，与 chrome-devtools MCP 行读同一个",
+  "# 环境变量 DSH_CHROME_PATH（分别的配置行，不是同一行）。",
   "# 需要换浏览器时改 start-web.sh 里的 DSH_CHROME_PATH，这里会自动跟随。",
   "- id: univer",
   "  config:",
@@ -185,3 +216,11 @@ fs.mkdirSync(require("node:path").dirname(file), { recursive: true });
 fs.writeFileSync(file, next.trimEnd() + "\n");
 console.log("[seed-profile] 渲染浏览器: DSH_CHROME_PATH");
 ' "$PATCH" "$RENDER_BEGIN" "$RENDER_END"
+
+# 配置卫生维护（A1/A2/A3）：删孤儿 patch 行、把误入标记块的外来行移出、YAML 语法
+# 预检（失败回滚并中止启动）。脚本随安装发布在 $DEST 下；缺失时跳过不阻塞启动。
+if [ -f "$DEST/maintain-profile.mjs" ]; then
+  "$NODE_BIN" "$DEST/maintain-profile.mjs" "$PATCH" "$PROFILE/cordis.yml" "$DEST" "$(echo $DISABLED | tr ' ' ',')"
+else
+  echo "[seed-profile] 缺少 maintain-profile.mjs，跳过配置卫生维护"
+fi

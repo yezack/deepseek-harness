@@ -1,18 +1,59 @@
 ================================================================
   DeepSeek Harness - UOS 离线安装包
 ================================================================
-  dsh 0.2.0-rc.2  |  Node.js 22.23.2 (linux-x64)
+  dsh 0.2.1-rc.2  |  Node.js 22.23.2 (linux-x64)
 ================================================================
 
 包内容
   install.sh     安装脚本（需 root）
   node.zip       Node.js v22.23.2 linux-x64
   app.zip        DeepSeek Harness + 全部依赖（约 1.3GB 解压后）
+  browser/       （可选）org.deepin.browser 升级 deb，见"系统浏览器升级"
+  enable-lan.sh  局域网访问脚本（root，加 DNAT 转发），见 remote-mobile 一节
+  doctor.sh      部署自检（glibc/原生模块/插件版本/浏览器/端口/配置）
+  collect-logs.sh 一键打包诊断信息
+  maintain-profile.mjs 启动时维护 cordis.patch.yml（删孤儿行、整理标记块、YAML 预检）
+  tools/pnpm-*.tgz （可选）内置 pnpm，供 plugin-manager 使用
+  tools/glibc*.tar.gz （可选）项目级兼容运行时：新 glibc，供需要高版本 glibc 的插件
 
 环境要求
   - UOS Desktop 20 (x86_64)，glibc 2.28 即可
   - root 权限（安装到 /deepseek-harness 与 /var/tmp/dsh-node）
   - 浏览器：内核低于 Chrome 119 时由内置兼容层自动补齐（见下）
+  - univer（Office）的原生绑定实际需要 **glibc ≥ 2.35**（实测缺
+    2.29/2.30/2.32/2.33/2.34/2.35 的符号），而 UOS 20 是 2.28。本包通过
+    **兼容运行时**（见下节）让 univer 正常工作，无需升级系统。
+
+兼容运行时（项目级，新 glibc）
+  随包带一份 Debian 12 的 libc6（glibc 2.36），安装到白名单路径
+  /var/tmp/dsh-glibc，并提供 wrapper：
+
+      /var/tmp/dsh-node/bin/node-glibc
+      = /var/tmp/dsh-glibc/ld-linux-x86-64.so.2 --library-path <glibc>:<node/lib> node "$@"
+
+  宿主 DSH 仍用系统 glibc（2.28）启动，只有**显式使用 wrapper 的子进程**走新
+  glibc。这样做的理由：换掉整个运行时会影响 NSS/DNS、系统库混用和调试路径；
+  而需要新 glibc 的插件（univer、computer-use、speech 等）本来就是**子进程**
+  （Gateway / Content Worker / MCP server），逐个切换风险可控。
+
+  start-web.sh 自动导出两个变量：
+      UNIVER_NODE_BINARY=<wrapper>   @yezack/dsh-univer-office >=0.3.8 认这个
+      DSH_NODE_GLIBC=<wrapper>       通用变量，其他插件子进程可复用
+
+  新插件遇到同类问题时：让它 spawn 时用 $DSH_NODE_GLIBC（或对应插件的
+  等价变量）即可，不需要再改系统。
+  doctor.sh 第 8 项会验证：loader 版本、wrapper 可运行、univer 两个绑定可加载、
+  兼容运行时下 DNS 正常。
+
+  刷新/更新这份 glibc（构建机有网时）：
+      curl -O https://mirrors.aliyun.com/debian/pool/main/g/glibc/libc6_2.36-9+deb12u14_amd64.deb
+      dpkg-deb -x libc6_*.deb root
+      mkdir -p dsh-glibc && cp -aL root/lib/x86_64-linux-gnu/*.so* dsh-glibc/
+      rm -f dsh-glibc/ld-linux-x86-64.so.2
+      cp root/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 dsh-glibc/
+      tar czf tools/glibc236.tar.gz dsh-glibc
+  注意：Debian/Ubuntu 22.04 的 deb 用 zstd 压缩，UOS 的 dpkg-deb 1.19 解不开；
+  Debian 12（xz 压缩）可以直接解。
 
 安装
   tar xzf dsh-uos-offline.tar.gz
@@ -20,6 +61,26 @@
   sudo ./install.sh
   自定义安装位置：
     sudo DSH_DEST=/opt/dsh ./install.sh
+
+系统浏览器升级（可选）
+  包内若带 browser/org.deepin.browser_*_amd64.deb，安装脚本会先检测系统自带
+  的 org.deepin.browser：版本低于包内版本时询问是否升级（默认跳过，回答
+  y 才执行 dpkg -i）。未安装该浏览器的机器不会被新装。
+  当前携带的是 UOS 官方仓库的 7.4.1100.59-1，内核 Chromium 126——老版本
+  6.3.9 只有 Chrome 93 内核。web-compat 兼容层（见下）已能让 93 内核正常
+  工作，升级只是为了摆脱对兼容层的依赖。
+  重新获取该 deb： apt-get download org.deepin.browser
+
+构建输入清单（deploy/uos 自带的与需自取的）
+  随仓库携带（保证可重建）：
+    extras/yezack-chrome-devtools-mcp-108-1.10.4.tgz   MCP fork
+    extras/yezack-dsh-remote-mobile-1.9.2.tgz          remote-mobile fork
+    tools/pnpm-12.14.0.tgz                             内置 pnpm
+  需要自己拉（体积大，未入库）：
+    extras/yezack-dsh-univer-office-0.3.8.tgz   npm pack @yezack/dsh-univer-office@0.3.8   (~47MB)
+    tools/glibc236.tar.gz                       按"兼容运行时"一节的命令从 Debian 12 libc6 生成 (~2MB)
+  dsh 的 tarball 索引由本地 build:official → release:pack → gen-index.ps1 →
+  assemble-bundle.ps1 生成（产物 _stage/dsh-tarballs.tar.gz），不随仓库提交。
 
 启动
   /deepseek-harness/start-web.sh
@@ -32,12 +93,43 @@
   Chrome 拒绝以 root 启动，root 也拿不到桌面会话的 X 授权，
   chrome-devtools MCP 会因此报 "Chrome failed to start"。
 
+  启动脚本会先跑 seed-profile.sh（幂等地维护 profile），再打印"实际驱动
+  MCP/univer 的浏览器路径"——这一行是排查浏览器相关问题的第一现场。
+
+部署自检与日志
+  doctor.sh          逐项体检：glibc、原生模块 dlopen、12 个插件版本与清单是否
+                     一致、系统/360 浏览器、DSH_CHROME_PATH、端口监听、DNAT
+                     规则、profile 标记块与孤儿行、YAML 语法。
+                     输出 [PASS]/[WARN]/[FAIL]，有 FAIL 时退出码 1。
+                     用法： ./doctor.sh             # 检查 /deepseek-harness
+                            ./doctor.sh /opt/dsh     # 指定安装目录
+  collect-logs.sh    把 system/doctor/日志/配置打成一个 tar.gz，排查时直接发给
+                     开发侧。用法： ./collect-logs.sh   → ~/dsh-logs-<时间戳>.tar.gz
+
+  建议每次换机器或排障前先跑一次 doctor.sh，它的输出就是"当前环境是否偏离
+  已知兼容基线"的证据。
+
+升级与备份
+  升级流程：停服务 → 把旧目录改名成 /deepseek-harness.bak-<时间戳> → 解压新包
+            → sudo ./install.sh → 启动。
+  install.sh 启动时会清理旧备份，**只保留最近 2 份** /deepseek-harness.bak-*，
+  避免 / 被历史副本吃满。回滚：把当前目录改名，再把目标 .bak 改回来。
+
+离线边界（重要）
+  - dshmarket 的"从市场安装新插件/检查更新"需要 npm registry，离线不可用；
+    插件启停、配置、profile 编辑读本地状态，正常工作。
+  - plugin-manager 的 list/install 依赖 pnpm 与 npm。本包已修好 npm shim 并内置
+    pnpm（install.sh 打印 pnpm 版本），但"真正从网上下载包"仍然需要网络。
+  - 任何"下载浏览器 / 下载模型 / 访问外网"的行为都不是本包的设计目标。
+
 浏览器兼容层（dsh-host-web-compat）
   服务端会在每个页面的 <head> 开头注入一段脚本，它是文档里的第一个
   script，对老内核补齐以下能力，对已支持的内核什么都不做：
 
     Promise.withResolvers   Chrome 119
     AbortSignal.any         Chrome 116
+    AbortSignal.throwIfAborted / .reason   Chrome 96 / 98（缺失时网关 RPC
+                            必炸，客户端无限"重新连接中"，实测于 Chrome 93）
     Array.prototype.toSorted / toReversed / toSpliced / with
     Array.fromAsync         Chrome 121
     Object.groupBy / Map.groupBy
@@ -55,19 +147,25 @@
   兼容层是幂等的，对现代浏览器只增加约 28KB 页面体积。
 
 预装插件与 chrome-devtools MCP
-  离线包已内置以下十一个插件，无需联网安装。这份清单与参考桌面 profile 的插件集
+  离线包已内置以下十二个插件，无需联网安装。这份清单与参考桌面 profile 的插件集
   一致（remote-mobile 用的是自维护 fork），版本取各包在镜像上的最新发布：
 
     dsh-capability-panel                    1.4.2     能力面板
-    @lemoncat7/dsh-ssh                      1.11.4    SSH 连接
-    dsh-rewind-plugin                       0.17.1    会话回退
-    dsh-dream-skin                          10.16.0   主题皮肤（默认关闭，见下）
+    @lemoncat7/dsh-ssh                      1.11.5    SSH 连接
+    dsh-rewind-plugin                       0.18.0    会话回退
+    dsh-dream-skin                          10.21.2   主题皮肤（默认关闭，见下）
     dsh-better-sidebar                      0.28.0    侧栏增强
     @linxin666/dsh-client-ui-git-graph      0.4.8     Git 图
-    dsh-session-manager                     0.7.3     会话管理
-    @yezack/dsh-temp-workspace              0.2.2     临时工作区（自维护 fork）
+    dsh-session-manager                     0.7.4     会话管理
+    dsh-better-workspace                    0.35.1    工作区增强
+    @yezack/dsh-univer-office               0.3.8     Office 文档（Univer，自维护 fork，见 glibc 限制）
+    @yezack/dsh-temp-workspace              0.2.4     临时工作区（自维护 fork）
     @yezack/dsh-remote-mobile               1.9.2     远程与移动端接入（扫码配对，自维护 fork）
-    dshmarket                               1.66.44   插件管理（启停 / 配置）
+    dshmarket                               1.66.47   插件管理（启停 / 配置）
+
+  另外随包安装一个可选的语言增强包（不是 bundle，不单独启用，只补
+  dsh-better-sidebar 的可选 peer）：
+    @huanlin/dsh-plugin-better-locale      0.4.3
 
   dsh-dream-skin 预装但**默认关闭**：它会替换整个外观，首次部署先保持 DSH 内置
   外观。关闭是通过 profile 的 cordis.patch.yml 里一段标记块实现的，由
@@ -81,6 +179,12 @@
   要用的时候把这一段（或其中那一项）删掉再重启即可，不需要重装。该块是幂等的，
   每次启动只替换自己那一段，文件里其他内容（比如手工加的 webserver 覆盖）原样保留。
 
+  dsh-better-workspace 的「工作区分组」默认改为**仅名称**（只按标题里的 / 分组，
+  不理会磁盘目录嵌套）。该设置不在插件的 cordis Config 里（Row Config 只有
+  compactChains / statusPulse / styling / appearance），保存在浏览器端持久 store
+  且持久值优先，所以是构建期改客户端代码的初始默认值（patch-better-workspace.mjs，
+  锚点缺失即失败，不静默跳过）。只影响从未动过这个设置的浏览器；改过的保持原样。
+
   注：旧版本包里的 @michengai/dsh-archive-manager 已不在清单内。profile 是持久的，
   升级安装时它会由 seed-profile.sh 从 bundles / dependencies / node_modules 三处
   一起摘掉，不需要手工清理。
@@ -90,17 +194,28 @@
   离线环境下会失败 —— 这不是故障，是预期行为。要装新插件请用新的离线包。
 
   @yezack/dsh-remote-mobile 需要额外一步才能对外服务：它把 DSH 开放给手机和其他
-  局域网设备，而 DSH 默认只监听 127.0.0.1。要让手机连得上，必须在
-  ~/.dsh/profiles/web/cordis.patch.yml 里放开监听：
+  局域网设备，而 DSH 默认只监听 127.0.0.1。
+
+  ⚠️ 0.2.1 起 webserver **不再接受 0.0.0.0**：通配绑定会被明确拒绝并让启动失败
+    （错误：host "0.0.0.0" is an unspecified (wildcard) address），只能绑一个
+    具体地址。旧部署里那条 host: 0.0.0.0 的覆盖会让升级后的 DSH 起不来 ——
+    seed-profile.sh 每次启动前会自动把它改成 127.0.0.1 并打印一行提示。
+
+  推荐做法：保持默认的 127.0.0.1，然后用包里的 enable-lan.sh（root）加转发规则，
+  回环与局域网同时可用，源地址仍是真实客户端 IP，配对门禁照常工作：
+
+      sudo /deepseek-harness/enable-lan.sh          # 默认端口 3080
+
+  只想要局域网、不需要本机回环的，也可以把 patch 里的 host 改成机器的具体 IP：
 
       - id: webserver
         config:
-          host: 0.0.0.0
+          host: 192.168.1.50        # ← 改成这台机器自己的局域网地址
           port: 3080
 
-  安装脚本**故意不写这条** —— 它把 DSH 的 Web 控制台（含终端与工作区能力）
-  暴露给整个网络。装好插件后进"设置 -> 远程与移动端"扫码配对即可，插件自带
-  访问控制、RSA 加密与防爆破锁定。仅在隔离内网使用。
+  安装脚本**故意不自动执行 enable-lan.sh** —— 它把 DSH 的 Web 控制台（含终端与
+  工作区能力）暴露给整个网络。装好插件后进"设置 -> 远程与移动端"扫码配对即可，
+  插件自带访问控制、RSA 加密与防爆破锁定。仅在隔离内网使用。
 
   ⚠️ 装上这个插件后，**从局域网 IP 访问会先被插件的授权门禁拦下**，跳转到
      /auth 要求输入 6 位配对码 —— 这是插件的工作方式，不是故障。回环地址
@@ -187,13 +302,18 @@
 
   它不再使用 `npx -y chrome-devtools-mcp@latest`（每次启动都要访问 registry）：
     - 服务端脚本取自安装目录
-    - 浏览器：安装时从下列候选里选第一个存在的
+    - 浏览器：安装时从下列候选里选第一个存在的（**固定 360 优先**）
         1. $DSH_CHROME_PATH（显式指定优先）
-        2. /usr/bin/browser360ent-cn-stable   360 企业浏览器
-        3. /usr/bin/browser                   deepin 自带
-      360 优先，因为在这类加固镜像上它才是内核较新的那个（实测"上海公安全能
-      安全浏览器 13.3.3200.187" = Chrome/108.0.5359.95），而 deepin 自带的
-      /usr/bin/browser 在部分版本上只有 Chrome 93，puppeteer 25 驱动不了。
+        2. /usr/bin/browser360ent-cn-stable   360 企业浏览器（Chrome/108.0.5359.95）
+        3. /usr/bin/browser                   系统自带浏览器（版本随镜像，可能很旧）
+
+      两个浏览器角色是分开的，不要混：
+        · 跑 DSH UI 的是**系统浏览器** /usr/share/browser（/usr/bin/browser）；
+          老镜像上只有 Chrome 93，由 web-compat 兼容层兜底（兼容基线是 Chrome 108，
+          不假设它被升级过）。
+        · DSH 使用中**拉起**的浏览器固定用 360 的 108：那是 chrome-devtools-mcp-108
+          fork 明确适配的内核（108-110 目标发现修复）。即使系统浏览器被 browser/
+          里的 deb 升到 126，也不改用 126 来驱动 MCP —— 那是两套路径。
     - 以临时 profile 运行，不触碰用户真实浏览器数据
     - 不使用 headless：UOS 的 deepin 浏览器 headless 必崩（trap int3），
       只能跑在桌面会话里。MCP 因此会打开一个可见窗口，
@@ -248,8 +368,12 @@
   /deepseek-harness/app                    应用与全部依赖（1.3GB）
   /deepseek-harness/start-web.sh           启动脚本
   /deepseek-harness/seed-profile.sh        预置 web profile（启动脚本调用）
+  /deepseek-harness/maintain-profile.mjs   profile 维护（孤儿行/标记块/YAML 预检）
+  /deepseek-harness/doctor.sh              部署自检
+  /deepseek-harness/collect-logs.sh        诊断信息打包
   /deepseek-harness/uninstall.sh           卸载脚本
-  /var/tmp/dsh-node/              Node 运行时（白名单路径）
+  /deepseek-harness/enable-lan.sh          局域网访问（DNAT 转发，需 root）
+  /var/tmp/dsh-node/              Node 运行时（白名单路径，含内置 pnpm）
   /var/tmp/dsh-native-cache/      原生模块缓存（白名单路径）
   ~/.dsh/                         DSH_HOME（会话与设置）
 

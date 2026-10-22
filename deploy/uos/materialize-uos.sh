@@ -107,6 +107,12 @@ echo "=== 4. 隐藏 dsh-remote-mobile 的 Tailscale 入口 ==="
 # 开关，所以改它打包好的客户端代码；脚本在锚点漂移时直接失败，不会静默跳过。
 "$NODE" "$BUILD/patch-remote-mobile.mjs" "$APP"
 
+echo "=== 4b. dsh-better-workspace 默认分组改为「仅名称」 ==="
+# workspaceGroupMode 不在插件的 cordis Config 里（Row Config 只有 compactChains /
+# statusPulse / styling / appearance），它存在浏览器端持久 store 且"持久值优先"，
+# 所以只能改客户端代码里的初始默认值；已选过模式的浏览器不受影响。
+"$NODE" "$BUILD/patch-better-workspace.mjs" "$APP"
+
 echo "=== 5. 验证 ==="
 "$NODE" "$APP/node_modules/@deepseek-ai/dsh/lib/bin.js" --version 2>&1 | head -3
 "$NODE" -e "const k=require('$APP/node_modules/koffi'); console.log('KOFFI_OK', typeof k.load)" 2>&1 | head -2

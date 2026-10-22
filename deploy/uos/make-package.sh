@@ -20,9 +20,34 @@ cp "$BUILD/install.sh" "$PKG/install.sh"
 cp "$BUILD/README.txt" "$PKG/README.txt"
 [ -f "$BUILD/seed-profile.sh" ] || { echo "[错误] $BUILD/seed-profile.sh 不存在"; exit 1; }
 cp "$BUILD/seed-profile.sh" "$PKG/seed-profile.sh"
+[ -f "$BUILD/enable-lan.sh" ] && cp "$BUILD/enable-lan.sh" "$PKG/enable-lan.sh"
+# 运维与自检脚本（D4/A1-A3）
+for tool in doctor.sh collect-logs.sh maintain-profile.mjs; do
+  [ -f "$BUILD/$tool" ] && cp "$BUILD/$tool" "$PKG/$tool"
+done
+# 内置工具：pnpm 的 npm 包 + 新 glibc 兼容运行时（B2 / 项目级 glibc）
+if [ -d "$BUILD/tools" ] && ls "$BUILD"/tools/*.tgz "$BUILD"/tools/*.tar.gz >/dev/null 2>&1; then
+  mkdir -p "$PKG/tools"
+  cp "$BUILD"/tools/*.tgz "$BUILD"/tools/*.tar.gz "$PKG/tools/" 2>/dev/null || true
+  echo "  携带工具: $(ls "$BUILD"/tools/*.tgz "$BUILD"/tools/*.tar.gz 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
+fi
 # 绝对模式：来源文件可能是 711 / 600（SFTP 上传的产物），chmod +x 不会补读位。
 chmod 755 "$PKG/install.sh" "$PKG/seed-profile.sh"
+[ -f "$PKG/enable-lan.sh" ] && chmod 755 "$PKG/enable-lan.sh"
+for tool in doctor.sh collect-logs.sh; do
+  [ -f "$PKG/$tool" ] && chmod 755 "$PKG/$tool"
+done
+[ -f "$PKG/maintain-profile.mjs" ] && chmod 644 "$PKG/maintain-profile.mjs"
 chmod 644 "$PKG/README.txt"
+
+# 可选：随包携带系统浏览器升级包。把 deb 放在 build-dir/browser/ 下即会被打包；
+# install.sh 只在目标机已装同一浏览器且版本更低时询问是否升级。
+# deb 来源： apt-get download org.deepin.browser   （UOS 官方仓库）
+if [ -d "$BUILD/browser" ] && ls "$BUILD/browser"/*.deb >/dev/null 2>&1; then
+  mkdir -p "$PKG/browser"
+  cp "$BUILD/browser"/*.deb "$PKG/browser/"
+  echo "  携带浏览器升级包: $(ls "$BUILD/browser"/*.deb | xargs -n1 basename | tr '\n' ' ')"
+fi
 
 echo "=== 2. 压缩 node ==="
 cd "$BUILD"

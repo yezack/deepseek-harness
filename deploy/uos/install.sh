@@ -7,7 +7,7 @@ INSTALL_NODE_DIR="/var/tmp/dsh-node"
 
 echo "============================================"
 echo "  DeepSeek Harness - UOS 离线安装"
-echo "  dsh 0.2.0-rc.2 / Node 22.23.2"
+echo "  dsh 0.2.1-rc.2 / Node 22.23.2"
 echo "============================================"
 echo
 echo "  安装位置: $DEST"
@@ -18,6 +18,25 @@ if [ "$(id -u)" != "0" ]; then
   echo "  提示: 当前非 root。$DEST 与 $INSTALL_NODE_DIR 需要写权限。"
   echo "        请用 root 运行： sudo ./install.sh"
   echo
+fi
+
+# D6 备份保留策略：保留最近 2 个 $DEST.bak-*，其余删除，避免小磁盘被历史副本吃光。
+# （升级流程是 mv 旧目录到 .bak-<时间戳>，再由本脚本重装。）
+KEEP_BACKUPS=2
+if compgen -G "$DEST.bak-*" >/dev/null 2>&1; then
+  BACKUPS="$(ls -1dt "$DEST".bak-* 2>/dev/null || true)"
+  COUNT=0
+  while IFS= read -r old; do
+    [ -z "$old" ] && continue
+    COUNT=$((COUNT + 1))
+    if [ "$COUNT" -gt "$KEEP_BACKUPS" ]; then
+      case "$old" in
+        "$DEST".bak-*) rm -rf "$old" && echo "  清理旧备份: $old" ;;
+      esac
+    fi
+  done <<EOF
+$BACKUPS
+EOF
 fi
 
 # 1. 展开 node 与 app
@@ -55,11 +74,127 @@ if [ -d "$KOROMIX_SRC" ]; then
   echo "      koffi 原生模块已链接到白名单路径"
 fi
 
+# B1 修复 npm/npx 的 shim。官方 tarball 里 bin/npm 是指向 npm-cli.js 的相对符号
+# 链接；用 cp -r 复制时容易退化成普通文件（内含相对 require），于是任何 `npm`
+# 调用都报模块找不到。这里无条件重建成绝对路径的 wrapper。
+NPM_CLI="$INSTALL_NODE_DIR/lib/node_modules/npm/bin/npm-cli.js"
+if [ -f "$NPM_CLI" ]; then
+  printf '#!/bin/sh\nexec "%s/bin/node" "%s" "$@"\n' "$INSTALL_NODE_DIR" "$NPM_CLI" > "$INSTALL_NODE_DIR/bin/npm"
+  chmod 755 "$INSTALL_NODE_DIR/bin/npm"
+  NPX_CLI="$INSTALL_NODE_DIR/lib/node_modules/npm/bin/npx-cli.js"
+  if [ -f "$NPX_CLI" ]; then
+    printf '#!/bin/sh\nexec "%s/bin/node" "%s" "$@"\n' "$INSTALL_NODE_DIR" "$NPX_CLI" > "$INSTALL_NODE_DIR/bin/npx"
+    chmod 755 "$INSTALL_NODE_DIR/bin/npx"
+  fi
+  echo "      npm shim 已修正: $("$INSTALL_NODE_DIR/bin/npm" --version 2>/dev/null || echo '仍不可用')"
+fi
+
+# B2 内置 pnpm：plugin-manager 用 pnpm 做 list/install，离线镜像里没有会被
+# spawn pnpm ENOENT。包内 tools/ 携带 pnpm 的 npm 包，解到白名单 node 的
+# node_modules 并生成 wrapper。
+PNPM_TGZ=""
+for candidate in "$HERE"/tools/pnpm-*.tgz; do
+  [ -f "$candidate" ] && { PNPM_TGZ="$candidate"; break; }
+done
+if [ -n "$PNPM_TGZ" ] && [ -f "$INSTALL_NODE_DIR/lib/node_modules/npm/package.json" ]; then
+  PNPM_DEST="$INSTALL_NODE_DIR/lib/node_modules/pnpm"
+  rm -rf "$PNPM_DEST"
+  mkdir -p "$PNPM_DEST"
+  if tar xzf "$PNPM_TGZ" -C "$PNPM_DEST" --strip-components=1 2>/dev/null && [ -f "$PNPM_DEST/bin/pnpm.mjs" ]; then
+    printf '#!/bin/sh\nexec "%s/bin/node" "%s/bin/pnpm.mjs" "$@"\n' "$INSTALL_NODE_DIR" "$PNPM_DEST" > "$INSTALL_NODE_DIR/bin/pnpm"
+    chmod 755 "$INSTALL_NODE_DIR/bin/pnpm"
+    printf '#!/bin/sh\nexec "%s/bin/node" "%s/bin/pnpx.mjs" "$@"\n' "$INSTALL_NODE_DIR" "$PNPM_DEST" > "$INSTALL_NODE_DIR/bin/pnpx"
+    chmod 755 "$INSTALL_NODE_DIR/bin/pnpx"
+    echo "      pnpm 已内置: $("$INSTALL_NODE_DIR/bin/pnpm" --version 2>/dev/null || echo '安装失败')"
+  else
+    echo "      [警告] pnpm 解包失败，plugin-manager 的 pnpm 操作不可用"
+  fi
+else
+  echo "      [提示] 包内没有 tools/pnpm-*.tgz，跳过 pnpm 内置（插件管理需联网）"
+fi
+
+# ============ 项目级兼容运行时（新 glibc） ============
+# 部分插件的原生 .node 按更高 glibc 编译（univer 的两个 Rust 绑定实际要
+# GLIBC >= 2.35，而 UOS 20 是 2.28）。这里随包带一份 Debian 12 的 libc6（2.36），
+# 装到白名单路径 /var/tmp/dsh-glibc，并提供 wrapper 用它的 loader 启动同一个 node。
+#
+# 关键取舍：**宿主 DSH 仍用系统 glibc**，只有显式使用 wrapper 的插件子进程走新
+# glibc（univer 的 Gateway / Unit Content Worker）。这避免换掉整个运行时带来的
+# NSS、系统库混用等风险；其他插件遇到同类问题可以直接复用这个 wrapper。
+GLIBC_DIR="/var/tmp/dsh-glibc"
+NODE_GLIBC="$INSTALL_NODE_DIR/bin/node-glibc"
+GLIBC_TARBALL=""
+for candidate in "$HERE"/tools/glibc*.tar.gz; do
+  [ -f "$candidate" ] && { GLIBC_TARBALL="$candidate"; break; }
+done
+if [ -n "$GLIBC_TARBALL" ]; then
+  rm -rf "$GLIBC_DIR"
+  tar xzf "$GLIBC_TARBALL" -C /var/tmp
+  chmod 755 "$GLIBC_DIR/ld-linux-x86-64.so.2" 2>/dev/null || true
+  cat > "$NODE_GLIBC" <<GLIBC_WRAPPER
+#!/bin/sh
+# 用随包的新 glibc 运行 node。宿主 DSH 不使用本脚本；需要新 glibc 的插件子进程
+# 通过 UNIVER_NODE_BINARY（univer）或 DSH_NODE_GLIBC（通用）引用它。
+exec "$GLIBC_DIR/ld-linux-x86-64.so.2" --library-path "$GLIBC_DIR:$INSTALL_NODE_DIR/lib" "$INSTALL_NODE_DIR/bin/node" "\$@"
+GLIBC_WRAPPER
+  chmod 755 "$NODE_GLIBC"
+  echo "      兼容运行时: $("$NODE_GLIBC" --version 2>/dev/null || echo '不可用')  [$("$GLIBC_DIR/ld-linux-x86-64.so.2" --version 2>/dev/null | head -1)]"
+else
+  echo "      [提示] 包内没有 tools/glibc*.tar.gz，跳过兼容运行时（需要新 glibc 的插件不可用）"
+fi
+
+# 系统浏览器升级（可选）。系统浏览器 = /usr/share/browser，跑 DSH UI 的那个。
+# 只对「已装同名包 org.deepin.browser 且版本更低」的机器询问，不新装浏览器。
+# 此步必须早于下面的浏览器探测：升级成功后 CHROME_BIN 才能拿到新内核。
+# 无论升不升都打印检测结果，便于从安装日志定位"为什么没升"。
+# 非交互安装（CI / 无人值守）可用 DSH_BROWSER_UPGRADE=y|n 直接决定。
+BROWSER_DEB_DIR="$HERE/browser"
+DEEPIN_VER="$(dpkg-query -W -f='${Version}' org.deepin.browser 2>/dev/null || true)"
+echo "      系统浏览器 org.deepin.browser: ${DEEPIN_VER:-未安装}"
+BROWSER_DEB=""
+if [ -d "$BROWSER_DEB_DIR" ]; then
+  BROWSER_DEB="$(ls "$BROWSER_DEB_DIR"/org.deepin.browser_*_amd64.deb 2>/dev/null | head -1)"
+fi
+if [ -z "$BROWSER_DEB" ]; then
+  echo "      包内未携带浏览器 deb（package/browser/ 不存在或为空），跳过升级检测"
+else
+  NEW_VER="$(dpkg-deb -f "$BROWSER_DEB" Version 2>/dev/null || true)"
+  echo "      包内浏览器 deb:   org.deepin.browser ${NEW_VER:-版本读取失败}（Chromium 126）"
+  if [ -z "$DEEPIN_VER" ]; then
+    echo "      系统未安装 org.deepin.browser，不自动新装（升级只针对同包名的旧版本）"
+  elif ! dpkg --compare-versions "$DEEPIN_VER" lt "$NEW_VER" 2>/dev/null; then
+    echo "      系统浏览器版本不低于包内版本，无需升级"
+  elif [ -n "${DSH_BROWSER_UPGRADE:-}" ]; then
+    case "$DSH_BROWSER_UPGRADE" in
+      y|Y|yes|YES)
+        if dpkg -i "$BROWSER_DEB"; then echo "      浏览器已升级到 $NEW_VER"
+        else echo "      [警告] 升级失败，DSH 本体不受影响；可手动: sudo dpkg -i $BROWSER_DEB"; fi ;;
+      *) echo "      已跳过浏览器升级（DSH_BROWSER_UPGRADE=$DSH_BROWSER_UPGRADE）" ;;
+    esac
+  elif [ "$(id -u)" != "0" ] || [ ! -e /dev/tty ]; then
+    echo "      当前非 root 或没有终端，跳过；可手动: sudo dpkg -i $BROWSER_DEB"
+  else
+    printf "      检测到系统浏览器 %s 低于包内 %s。是否升级？[y/N] " "$DEEPIN_VER" "$NEW_VER"
+    read -r BROWSER_UPGRADE_ANS < /dev/tty 2>/dev/null || BROWSER_UPGRADE_ANS=""
+    case "$BROWSER_UPGRADE_ANS" in
+      y|Y|yes|YES)
+        if dpkg -i "$BROWSER_DEB"; then echo "      浏览器已升级到 $NEW_VER"
+        else echo "      [警告] 升级失败，DSH 本体不受影响；可手动: sudo dpkg -i $BROWSER_DEB"; fi ;;
+      *) echo "      已跳过浏览器升级（非交互安装可设 DSH_BROWSER_UPGRADE=y）" ;;
+    esac
+  fi
+fi
+
 # chrome-devtools MCP 需要一个浏览器。只报告不阻断，其余功能不依赖它。
 #
-# 候选有优先级：360 企业浏览器在前。它在本类加固镜像上才是内核较新的那个
-# （上海公安全能安全浏览器 13.3.3200.187 = Chrome/108.0.5359.95），而 deepin
-# 自带的 /usr/bin/browser 在部分版本上只有 Chrome 93，puppeteer 25 驱动不了。
+# 两个浏览器角色是分开的，不要混：
+#   - 跑 DSH UI 的是**系统浏览器** /usr/share/browser（/usr/bin/browser）。
+#     它的版本随镜像而定（老镜像 6.3.9 = Chrome 93），由 web-compat 兼容层兜底，
+#     本包的兼容基线就是 Chrome 108，不假设它已被升级。
+#   - DSH 使用中**拉起**的浏览器（chrome-devtools MCP、univer 渲染）固定用 360
+#     企业浏览器：上海公安全能安全浏览器 13.3.3200.187 = Chrome/108.0.5359.95。
+#     这正是 @yezack/chrome-devtools-mcp-108 fork 的适配内核（108-110 的目标
+#     发现修复），所以即使系统浏览器被升到 126 也不改用 126 驱动。
 if [ -n "${DSH_CHROME_PATH:-}" ]; then
   CHROME_BIN="$DSH_CHROME_PATH"
 else
@@ -94,6 +229,25 @@ cp "$HERE/seed-profile.sh" "$DEST/seed-profile.sh"
 # 静默失败、插件全部停用。
 chmod 755 "$DEST/seed-profile.sh"
 
+# 局域网访问脚本：0.2.1 只能绑一个具体地址，同时服务回环与局域网需要 DNAT 转发。
+# 安装时不自动执行（改防火墙要操作员知情），README 里写明用法。
+if [ -f "$HERE/enable-lan.sh" ]; then
+  cp "$HERE/enable-lan.sh" "$DEST/enable-lan.sh"
+  chmod 755 "$DEST/enable-lan.sh"
+fi
+
+# 自检与运维脚本（D4）。doctor 每次启动前由 start-web.sh 简要跑一遍也可以，
+# 但为避免拖慢启动，只在安装结束时提示操作员手动执行。
+for tool in doctor.sh collect-logs.sh maintain-profile.mjs; do
+  if [ -f "$HERE/$tool" ]; then
+    cp "$HERE/$tool" "$DEST/$tool"
+    case "$tool" in
+      *.sh) chmod 755 "$DEST/$tool" ;;
+      *) chmod 644 "$DEST/$tool" ;;
+    esac
+  fi
+done
+
 # 生成启动脚本
 cat > "$DEST/start-web.sh" <<LAUNCH
 #!/bin/bash
@@ -117,6 +271,23 @@ mkdir -p "\$DSH_HOME" "\$DSH_CHROME_HOME" /var/tmp/dsh-native-cache 2>/dev/null
 # 目录解析不到它们，只会记一条 "failed to import" 并静默停用插件。
 SEED_NODE="$INSTALL_NODE_DIR/bin/node" "$DEST/seed-profile.sh" "$DEST"
 cd "\$DEST"
+# 项目级兼容运行时：需要更新 glibc 的插件子进程用这个 wrapper 启动 node。
+# univer 的 fork（>=0.3.8）认 UNIVER_NODE_BINARY；其他插件可用通用的 DSH_NODE_GLIBC。
+# 宿主 DSH 不受影响（仍用系统 glibc）。
+export UNIVER_NODE_BINARY="\${UNIVER_NODE_BINARY:-$NODE_GLIBC}"
+export DSH_NODE_GLIBC="\${DSH_NODE_GLIBC:-$NODE_GLIBC}"
+# A4：启动时把"实际驱动 MCP / univer 的浏览器"打印出来。现场最容易踩的坑是
+# 以为在用 360，实际落到了 /usr/bin/browser（老内核），排查时看不到这一行。
+if [ -n "\${DSH_CHROME_PATH:-}" ]; then
+  echo "  拉起用浏览器: \$DSH_CHROME_PATH"
+else
+  echo "  [警告] DSH_CHROME_PATH 未设置，MCP/univer 将回落到默认值"
+fi
+if [ -x "$NODE_GLIBC" ]; then
+  echo "  兼容运行时:   \$DSH_NODE_GLIBC（glibc $("$GLIBC_DIR/ld-linux-x86-64.so.2" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)）"
+else
+  echo "  [提示] 兼容运行时未安装（$NODE_GLIBC 不存在）"
+fi
 echo "============================================"
 echo "  DeepSeek Harness - Web 服务"
 echo "  浏览器打开下面打印的带 token 的地址"
@@ -142,4 +313,8 @@ echo "============================================"
 echo "  安装完成"
 echo "  启动 Web:  $DEST/start-web.sh"
 echo "  浏览器访问: http://127.0.0.1:3080/"
+echo "  部署自检:  $DEST/doctor.sh        （PASS/WARN/FAIL 体检）"
+echo "  日志打包:  $DEST/collect-logs.sh  （排查问题时发给开发侧）"
+echo "  局域网访问: sudo $DEST/enable-lan.sh   （0.2.1 需 DNAT 才能同时服务回环与局域网）"
+echo "  兼容运行时: $NODE_GLIBC   （新 glibc，供 univer 等插件子进程）"
 echo "============================================"
