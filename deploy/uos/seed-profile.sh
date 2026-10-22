@@ -25,10 +25,18 @@ NODE_BIN="${SEED_NODE:-node}"
 PROFILE="$HOME_DIR/profiles/web"
 MODULES="$PROFILE/node_modules"
 
+# 写 profile 前留一份带时间戳的备份（保留最近 3 份）。seed-profile 现在是
+# **安装/升级阶段**唯一的写入口；即便如此，用户配置仍然要先备份再动。
+mkdir -p "$PROFILE"
+if [ -f "$PROFILE/cordis.patch.yml" ]; then
+  cp -p "$PROFILE/cordis.patch.yml" "$PROFILE/cordis.patch.yml.$(date +%Y%m%d-%H%M%S).bak"
+  ls -1t "$PROFILE"/cordis.patch.yml.*.bak 2>/dev/null | tail -n +4 | xargs -r rm -f
+fi
+
 # 预装插件的唯一清单：name@version。软链、dependencies、bundles 三处都由它派生，
 # 避免清单写多份后漏改其中一处（dshmarket 那次就是漏改软链那一份）。
 # 与 packages/boot/app-boot/src/profile.ts 的 web 模板保持一致。
-BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.5 dshmarket@1.66.47 dsh-rewind-plugin@0.18.0 dsh-dream-skin@10.21.2 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.4 dsh-better-workspace@0.35.1 @yezack/dsh-univer-office@0.3.8 @yezack/dsh-temp-workspace@0.2.4 @yezack/dsh-remote-mobile@1.9.2"
+BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.5 dshmarket@1.66.47 dsh-rewind-plugin@0.18.0 dsh-dream-skin@10.22.0 dsh-better-sidebar@0.28.0 @linxin666/dsh-client-ui-git-graph@0.4.8 dsh-session-manager@0.7.4 dsh-better-workspace@0.35.1 @yezack/dsh-univer-office@0.3.8 @yezack/dsh-temp-workspace@0.2.4 @yezack/dsh-remote-mobile@1.10.0"
 
 # 预装但默认禁用的插件。它们装进 node_modules 与 bundles，由 profile 的
 # cordis.patch.yml 关掉，这样操作员要用的那天在设置里打开即可，不必重装。
@@ -217,10 +225,27 @@ fs.writeFileSync(file, next.trimEnd() + "\n");
 console.log("[seed-profile] 渲染浏览器: DSH_CHROME_PATH");
 ' "$PATCH" "$RENDER_BEGIN" "$RENDER_END"
 
-# 配置卫生维护（A1/A2/A3）：删孤儿 patch 行、把误入标记块的外来行移出、YAML 语法
-# 预检（失败回滚并中止启动）。脚本随安装发布在 $DEST 下；缺失时跳过不阻塞启动。
+# 配置卫生维护：把误入标记块的外来行移出、可疑行只提示（绝不自动删用户配置）、
+# YAML 语法预检（失败回滚）。脚本随安装发布在 $DEST 下；缺失时跳过。
 if [ -f "$DEST/maintain-profile.mjs" ]; then
   "$NODE_BIN" "$DEST/maintain-profile.mjs" "$PATCH" "$PROFILE/cordis.yml" "$DEST" "$(echo $DISABLED | tr ' ' ',')"
 else
   echo "[seed-profile] 缺少 maintain-profile.mjs，跳过配置卫生维护"
 fi
+
+# 播种标记：记录"哪个 dsh 版本播过种、谁播的、何时"。启动时的 preflight.sh 用它
+# 判断 profile 是否与当前安装同步（只读，不触发任何写入）。
+DSH_VER="$(LC_ALL=C "$NODE_BIN" -p "require('$DEST/app/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
+"$NODE_BIN" -e '
+const fs = require("node:fs")
+const path = require("node:path")
+const [profileDir, dshVersion] = process.argv.slice(1)
+const file = path.join(profileDir, ".dsh-offline-state.json")
+fs.writeFileSync(file, JSON.stringify({
+  seedVersion: 2,
+  dshVersion,
+  seededAt: new Date().toISOString(),
+  seededBy: process.env.USER || process.env.LOGNAME || "unknown",
+}, null, 2) + "\n")
+' "$PROFILE" "$DSH_VER"
+echo "[seed-profile] 播种标记: dsh $DSH_VER"

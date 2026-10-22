@@ -71,21 +71,6 @@
   工作，升级只是为了摆脱对兼容层的依赖。
   重新获取该 deb： apt-get download org.deepin.browser
 
-构建输入清单（deploy/uos 自带的与需自取的）
-  随仓库携带（保证可重建）：
-    extras/yezack-chrome-devtools-mcp-108-1.10.4.tgz   MCP fork
-    extras/yezack-dsh-remote-mobile-1.9.2.tgz          remote-mobile fork
-    tools/pnpm-12.14.0.tgz                             内置 pnpm
-  需要自己拉（体积大，未入库）：
-    extras/yezack-dsh-univer-office-0.3.8.tgz   npm pack @yezack/dsh-univer-office@0.3.8   (~47MB)
-    tools/glibc236.tar.gz                       按"兼容运行时"一节的命令从 Debian 12 libc6 生成 (~2MB)
-  dsh 的 tarball 索引由本地 build:official → release:pack → gen-index.ps1 →
-  assemble-bundle.ps1 生成（产物 _stage/dsh-tarballs.tar.gz），不随仓库提交。
-
-  构建完成后**必须把包拉回开发机**留档（工作区 _stage/dist/，附 sha256 清单）：
-  构建机开临时 HTTP 通道（SFTP 工具有 512MiB 单文件上限，大包传不了），
-  开发机用 _stage/pull-package.ps1 下载并校验。详见 _stage/README.md。
-
 启动
   /deepseek-harness/start-web.sh
   它会在控制台打印一行带 token 的地址，例如：
@@ -97,8 +82,9 @@
   Chrome 拒绝以 root 启动，root 也拿不到桌面会话的 X 授权，
   chrome-devtools MCP 会因此报 "Chrome failed to start"。
 
-  启动脚本会先跑 seed-profile.sh（幂等地维护 profile），再打印"实际驱动
+  启动脚本会先跑 preflight.sh 做**只读**预检（不改任何文件），再打印"实际驱动
   MCP/univer 的浏览器路径"——这一行是排查浏览器相关问题的第一现场。
+  写 profile 是**安装阶段**的职责：install.sh 以目标用户身份执行 seed-profile.sh。
 
 部署自检与日志
   doctor.sh          逐项体检：glibc、原生模块 dlopen、12 个插件版本与清单是否
@@ -157,14 +143,14 @@
     dsh-capability-panel                    1.4.2     能力面板
     @lemoncat7/dsh-ssh                      1.11.5    SSH 连接
     dsh-rewind-plugin                       0.18.0    会话回退
-    dsh-dream-skin                          10.21.2   主题皮肤（默认关闭，见下）
+    dsh-dream-skin                          10.22.0   主题皮肤（默认关闭，见下）
     dsh-better-sidebar                      0.28.0    侧栏增强
     @linxin666/dsh-client-ui-git-graph      0.4.8     Git 图
     dsh-session-manager                     0.7.4     会话管理
     dsh-better-workspace                    0.35.1    工作区增强
     @yezack/dsh-univer-office               0.3.8     Office 文档（Univer，自维护 fork，见 glibc 限制）
     @yezack/dsh-temp-workspace              0.2.4     临时工作区（自维护 fork）
-    @yezack/dsh-remote-mobile               1.9.2     远程与移动端接入（扫码配对，自维护 fork）
+    @yezack/dsh-remote-mobile               1.10.0     远程与移动端接入（扫码配对，自维护 fork）
     dshmarket                               1.66.47   插件管理（启停 / 配置）
 
   另外随包安装一个可选的语言增强包（不是 bundle，不单独启用，只补
@@ -181,7 +167,7 @@
       # <<< dsh-offline: default-disabled plugins
 
   要用的时候把这一段（或其中那一项）删掉再重启即可，不需要重装。该块是幂等的，
-  每次启动只替换自己那一段，文件里其他内容（比如手工加的 webserver 覆盖）原样保留。
+  每次重跑只替换自己那一段，文件里其他内容（比如手工加的 webserver 覆盖）原样保留。
 
   dsh-better-workspace 的「工作区分组」默认改为**仅名称**（只按标题里的 / 分组，
   不理会磁盘目录嵌套）。该设置不在插件的 cordis Config 里（Row Config 只有
@@ -203,7 +189,7 @@
   ⚠️ 0.2.1 起 webserver **不再接受 0.0.0.0**：通配绑定会被明确拒绝并让启动失败
     （错误：host "0.0.0.0" is an unspecified (wildcard) address），只能绑一个
     具体地址。旧部署里那条 host: 0.0.0.0 的覆盖会让升级后的 DSH 起不来 ——
-    seed-profile.sh 每次启动前会自动把它改成 127.0.0.1 并打印一行提示。
+    seed-profile.sh（安装阶段）会自动把它改成 127.0.0.1 并打印一行提示。
 
   推荐做法：保持默认的 127.0.0.1，然后用包里的 enable-lan.sh（root）加转发规则，
   回环与局域网同时可用，源地址仍是真实客户端 IP，配对门禁照常工作：
@@ -345,7 +331,7 @@
     DSH_CHROME_PATH          浏览器可执行文件
     DSH_CHROME_DEVTOOLS_MCP  MCP 服务端脚本
 
-  这三个 bundle 由 seed-profile.sh 在每次启动前就位。原因：Loader 是从 profile
+  这三个 bundle 由 seed-profile.sh 在安装阶段就位。原因：Loader 是从 profile
   目录用原生 Node 解析导入 bundle 条目的（不是从安装目录），profile 下没有
   node_modules 时插件会被静默停用，只在启动日志里留一行
   "N entries did not activate"。脚本幂等，已存在的 manifest 只补 dependencies，
@@ -371,7 +357,7 @@
 安装后的目录
   /deepseek-harness/app                    应用与全部依赖（1.3GB）
   /deepseek-harness/start-web.sh           启动脚本
-  /deepseek-harness/seed-profile.sh        预置 web profile（启动脚本调用）
+  /deepseek-harness/seed-profile.sh        预置 web profile（安装时调用；可手动重跑）
   /deepseek-harness/maintain-profile.mjs   profile 维护（孤儿行/标记块/YAML 预检）
   /deepseek-harness/doctor.sh              部署自检
   /deepseek-harness/collect-logs.sh        诊断信息打包

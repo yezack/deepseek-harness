@@ -184,11 +184,12 @@ if [ -f "$PATCH" ]; then
   if [ -z "$KNOWN" ]; then
     skip "无法枚举已知 entry，跳过孤儿行检查"
   else
+    export KNOWN_IDS="$KNOWN"
     ORPHANS="$("$NODE_BIN" -e '
 const fs = require("node:fs")
-const [patchFile, knownFile] = process.argv.slice(1)
+const [patchFile] = process.argv.slice(1)
 const text = fs.readFileSync(patchFile, "utf8")
-const known = new Set((fs.existsSync(knownFile) ? fs.readFileSync(knownFile, "utf8") : "").split("\n").map((s) => s.trim()).filter(Boolean))
+const known = new Set((process.env.KNOWN_IDS || "").split("\n").map((s) => s.trim()).filter(Boolean))
 const lines = text.split("\n")
 // insert: 块内的 - id 行定义新 entry（例如模型配置），不是孤儿。
 const stack = []
@@ -207,7 +208,7 @@ for (let i = 0; i < lines.length; i += 1) {
   suspicious.push(m[1])
 }
 if (suspicious.length > 0) console.log(suspicious.join(" "))
-' "$PATCH" "$PROFILE_HOME/cordis.yml" 2>/dev/null)"
+' "$PATCH" 2>/dev/null)"
     if [ -n "$ORPHANS" ]; then
       warn "可疑 patch 行（没有 bundle/cordis.yml 提供该 entry，仅供核对，不会被自动删除）: $(echo "$ORPHANS" | tr '\n' ' ')"
     else
@@ -224,8 +225,22 @@ yaml.load(fs.readFileSync(process.argv[2], "utf8"), { schema: yaml.DEFAULT_SCHEM
   else
     bad "cordis.patch.yml 语法错误（YAML 解析失败）"
   fi
+  # 播种标记：profile 由安装阶段写入（start 不再改配置），标记与当前安装版本对不上
+  # 说明插件版本没同步，需要重跑 seed-profile.sh。
+  STATE="$PROFILE_HOME/.dsh-offline-state.json"
+  if [ -f "$STATE" ]; then
+    SEEDED="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["dshVersion"])' "$STATE" 2>/dev/null || true)"
+    WANT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$DEST/app/node_modules/@deepseek-ai/dsh/package.json" 2>/dev/null || true)"
+    if [ -n "$SEEDED" ] && [ -n "$WANT" ] && [ "$SEEDED" = "$WANT" ]; then
+      ok "profile 播种版本与安装一致（dsh $SEEDED）"
+    else
+      warn "profile 由 dsh ${SEEDED:-未知} 播种，当前安装 ${WANT:-未知}（运行 seed-profile.sh 同步）"
+    fi
+  else
+    warn "没有播种标记 .dsh-offline-state.json（旧 profile；安装阶段会写入）"
+  fi
 else
-  warn "没有 $PATCH（首次启动会由 seed-profile.sh 创建）"
+  warn "没有 $PATCH（安装阶段应由 seed-profile.sh 创建）"
 fi
 
 echo

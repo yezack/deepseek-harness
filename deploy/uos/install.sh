@@ -248,6 +248,120 @@ for tool in doctor.sh collect-logs.sh maintain-profile.mjs; do
   fi
 done
 
+# ============ 以目标用户身份播种 profile ============
+# 设计约定：**写 profile 只发生在安装/升级阶段**（以及手动重跑 seed-profile.sh）。
+# start-web.sh 只做只读预检，不再每秒重启都改用户配置 —— 早先把 seeding 放在
+# 启动里，维护脚本一有 bug 就会反复破坏用户配置（模型条目被当孤儿删掉）。
+TARGET_USER="${DSH_USER:-${SUDO_USER:-}}"
+if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+  if [ -n "${DSH_USER:-}" ] && [ "$TARGET_USER" = "root" ]; then
+    echo "      [警告] DSH_USER=root 不可用：profile 应属于桌面登录用户"
+  else
+    echo "      [警告] 无法确定 profile 的目标用户（DSH_USER / SUDO_USER 都为空）"
+    echo "             profile 未播种；稍后请以桌面用户身份执行："
+    echo "             DSH_HOME=\$HOME/.dsh $DEST/seed-profile.sh $DEST"
+  fi
+else
+  TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+  if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
+    echo "      [警告] 用户 $TARGET_USER 的家目录不存在，跳过 profile 播种"
+  else
+    DSH_HOME_DIR="$TARGET_HOME/.dsh"
+    PROFILE_DIR="$DSH_HOME_DIR/profiles/web"
+    TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")"
+    install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$DSH_HOME_DIR" "$PROFILE_DIR" 2>/dev/null || true
+    # 写 profile 前留带时间戳的备份，只保留最近 3 份。
+    if [ -f "$PROFILE_DIR/cordis.patch.yml" ]; then
+      cp -p "$PROFILE_DIR/cordis.patch.yml" "$PROFILE_DIR/cordis.patch.yml.$(date +%Y%m%d-%H%M%S).bak"
+      ls -1t "$PROFILE_DIR"/cordis.patch.yml.*.bak 2>/dev/null | tail -n +4 | xargs -r rm -f
+    fi
+    echo "      播种 profile（用户 $TARGET_USER）..."
+    if [ "$(id -u)" = "0" ] && [ "$TARGET_USER" != "root" ]; then
+      SEED_OK=0
+      if command -v sudo >/dev/null 2>&1; then
+        sudo -u "$TARGET_USER" -H env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
+          "$DEST/seed-profile.sh" "$DEST" 2>&1 | sed 's/^/      /' || SEED_OK=$?
+      else
+        runuser -u "$TARGET_USER" -- env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
+          "$DEST/seed-profile.sh" "$DEST" 2>&1 | sed 's/^/      /' || SEED_OK=$?
+      fi
+      if [ "${SEED_OK:-0}" = "0" ]; then
+        echo "      profile 已就绪: $PROFILE_DIR"
+      else
+        echo "      [警告] profile 播种失败（退出码 $SEED_OK），请手动执行："
+        echo "             sudo -u $TARGET_USER $DEST/seed-profile.sh $DEST"
+      fi
+    else
+      env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
+        "$DEST/seed-profile.sh" "$DEST" 2>&1 | sed 's/^/      /' || true
+    fi
+  fi
+fi
+
+# 生成启动前的只读预检脚本（不修改任何文件；只报告问题并给出修复命令）。
+cat > "$DEST/preflight.sh" <<'PREFLIGHT_TEMPLATE'
+#!/bin/bash
+# 启动前只读预检。不写任何文件；发现问题只打印提示与修复命令。
+set -u
+PREFLIGHT_DEST="__DEST__"
+export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+PREFLIGHT_NODE="__NODE__"
+PROFILE="$DSH_HOME/profiles/web"
+PATCH="$PROFILE/cordis.patch.yml"
+problems=0
+note() { echo "  [预检] $*"; }
+fix()  { echo "          修复: $*"; }
+
+if [ ! -f "$PROFILE/package.json" ]; then
+  note "profile 不存在（$PROFILE）"
+  fix "$PREFLIGHT_DEST/seed-profile.sh $PREFLIGHT_DEST（以桌面用户身份执行）"
+  problems=$((problems + 1))
+else
+  MISSING="$("$PREFLIGHT_NODE" -e '
+const fs = require("node:fs")
+const path = require("node:path")
+const profile = process.argv[1]
+let manifest
+try { manifest = JSON.parse(fs.readFileSync(path.join(profile, "package.json"), "utf8")) } catch (error) { process.exit(0) }
+const bundles = (manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles) || []
+// 官方 @deepseek-ai/* 由应用自身的 node_modules 提供，不在 profile 里链接。
+const thirdParty = bundles.filter((name) => !name.startsWith('@deepseek-ai/'))
+const missing = thirdParty.filter((name) => !fs.existsSync(path.join(profile, "node_modules", name, "package.json")))
+if (missing.length > 0) console.log(missing.join(" "))
+' "$PROFILE" 2>/dev/null)"
+  if [ -n "$MISSING" ]; then
+    note "预装插件未链接到 profile: $MISSING"
+    fix "$PREFLIGHT_DEST/seed-profile.sh $PREFLIGHT_DEST"
+    problems=$((problems + 1))
+  fi
+  if grep -qE '^\s*host:\s*["'"'"']?(0\.0\.0\.0|::)' "$PATCH" 2>/dev/null; then
+    note "webserver 仍绑定 0.0.0.0（0.2.1 会拒绝启动）"
+    fix "$PREFLIGHT_DEST/seed-profile.sh $PREFLIGHT_DEST"
+    problems=$((problems + 1))
+  fi
+  if [ -f "$PROFILE/.dsh-offline-state.json" ]; then
+    SEEDED="$("$PREFLIGHT_NODE" -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).dshVersion' "$PROFILE/.dsh-offline-state.json" 2>/dev/null)"
+    WANT="$("$PREFLIGHT_NODE" -p 'require(process.argv[1]).version' "__DEST__/app/node_modules/@deepseek-ai/dsh/package.json" 2>/dev/null)"
+    if [ -n "$SEEDED" ] && [ -n "$WANT" ] && [ "$SEEDED" != "$WANT" ]; then
+      note "profile 由 dsh $SEEDED 播种，当前安装是 $WANT"
+      fix "$PREFLIGHT_DEST/seed-profile.sh $PREFLIGHT_DEST（同步预装插件版本）"
+      problems=$((problems + 1))
+    fi
+  else
+    note "profile 没有播种标记（.dsh-offline-state.json）"
+    fix "$PREFLIGHT_DEST/seed-profile.sh $PREFLIGHT_DEST"
+    problems=$((problems + 1))
+  fi
+fi
+if [ "$problems" -gt 0 ]; then
+  echo "  [预检] 共 $problems 个问题；服务仍会启动，但插件可能不完整"
+fi
+exit 0
+PREFLIGHT_TEMPLATE
+# 把安装期的路径固化进去（模板用占位符避免 heredoc 转义地狱）。
+sed -i "s|__DEST__|$DEST|g; s|__NODE__|$INSTALL_NODE_DIR/bin/node|g" "$DEST/preflight.sh"
+chmod 755 "$DEST/preflight.sh"
+
 # 生成启动脚本
 cat > "$DEST/start-web.sh" <<LAUNCH
 #!/bin/bash
@@ -267,9 +381,9 @@ export DSH_CHROME_HOME="\${DSH_CHROME_HOME:-$CHROME_HOME}"
 # 所以 MCP 不带 --headless，并且这里保证 DISPLAY 可用。
 export DISPLAY="\${DISPLAY:-:0}"
 mkdir -p "\$DSH_HOME" "\$DSH_CHROME_HOME" /var/tmp/dsh-native-cache 2>/dev/null
-# 预装 bundle 必须在 DSH 首次创建 profile 之前就位，否则 Loader 从 profile
-# 目录解析不到它们，只会记一条 "failed to import" 并静默停用插件。
-SEED_NODE="$INSTALL_NODE_DIR/bin/node" "$DEST/seed-profile.sh" "$DEST"
+# 写 profile 是安装/升级阶段的职责（seed-profile.sh，install 时以目标用户执行）。
+# 启动只做**只读**预检：发现 profile 缺失/未同步时打印修复命令，绝不改文件。
+"$DEST/preflight.sh" || true
 cd "\$DEST"
 # 项目级兼容运行时：需要更新 glibc 的插件子进程用这个 wrapper 启动 node。
 # univer 的 fork（>=0.3.8）认 UNIVER_NODE_BINARY；其他插件可用通用的 DSH_NODE_GLIBC。

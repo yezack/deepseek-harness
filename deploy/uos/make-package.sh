@@ -21,8 +21,8 @@ cp "$BUILD/README.txt" "$PKG/README.txt"
 [ -f "$BUILD/seed-profile.sh" ] || { echo "[错误] $BUILD/seed-profile.sh 不存在"; exit 1; }
 cp "$BUILD/seed-profile.sh" "$PKG/seed-profile.sh"
 [ -f "$BUILD/enable-lan.sh" ] && cp "$BUILD/enable-lan.sh" "$PKG/enable-lan.sh"
-# 运维与自检脚本（D4/A1-A3）
-for tool in doctor.sh collect-logs.sh maintain-profile.mjs; do
+# 运维与自检脚本
+for tool in doctor.sh collect-logs.sh maintain-profile.mjs preflight.sh; do
   [ -f "$BUILD/$tool" ] && cp "$BUILD/$tool" "$PKG/$tool"
 done
 # 内置工具：pnpm 的 npm 包 + 新 glibc 兼容运行时（B2 / 项目级 glibc）
@@ -34,7 +34,7 @@ fi
 # 绝对模式：来源文件可能是 711 / 600（SFTP 上传的产物），chmod +x 不会补读位。
 chmod 755 "$PKG/install.sh" "$PKG/seed-profile.sh"
 [ -f "$PKG/enable-lan.sh" ] && chmod 755 "$PKG/enable-lan.sh"
-for tool in doctor.sh collect-logs.sh; do
+for tool in doctor.sh collect-logs.sh preflight.sh; do
   [ -f "$PKG/$tool" ] && chmod 755 "$PKG/$tool"
 done
 [ -f "$PKG/maintain-profile.mjs" ] && chmod 644 "$PKG/maintain-profile.mjs"
