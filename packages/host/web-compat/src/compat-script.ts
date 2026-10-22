@@ -98,8 +98,8 @@ const COMPAT_SCRIPT_SOURCE = String.raw`(function () {
 
   if (typeof g.AbortSignal !== 'undefined' && typeof g.AbortSignal.prototype !== 'undefined') {
     /* Chrome 98-. The getter cannot replay a custom abort reason on engines
-    without one; it always synthesizes an AbortError so `throwIfAborted` and
-    `signal.reason` readers keep working. */
+    without one; it always synthesizes an AbortError so "throwIfAborted" and
+    "signal.reason" readers keep working. */
     if (!Object.getOwnPropertyDescriptor(g.AbortSignal.prototype, 'reason')) {
       try {
         Object.defineProperty(g.AbortSignal.prototype, 'reason', {
