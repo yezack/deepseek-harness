@@ -82,6 +82,10 @@
   dsh 的 tarball 索引由本地 build:official → release:pack → gen-index.ps1 →
   assemble-bundle.ps1 生成（产物 _stage/dsh-tarballs.tar.gz），不随仓库提交。
 
+  构建完成后**必须把包拉回开发机**留档（工作区 _stage/dist/，附 sha256 清单）：
+  构建机开临时 HTTP 通道（SFTP 工具有 512MiB 单文件上限，大包传不了），
+  开发机用 _stage/pull-package.ps1 下载并校验。详见 _stage/README.md。
+
 启动
   /deepseek-harness/start-web.sh
   它会在控制台打印一行带 token 的地址，例如：
