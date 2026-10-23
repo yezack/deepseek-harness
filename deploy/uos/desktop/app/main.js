@@ -163,7 +163,7 @@ function createWindow() {
     title: 'DeepSeek Harness',
     show: false,
     autoHideMenuBar: true,
-    icon: path.join(__dirname, 'tray.png'),
+    icon: path.join(__dirname, 'icon.png'),
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   })
   mainWindow.once('ready-to-show', () => mainWindow?.show())
