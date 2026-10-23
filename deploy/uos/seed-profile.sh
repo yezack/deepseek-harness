@@ -40,8 +40,10 @@ BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.5 dshmarket@1.66.47 
 
 # 预装但默认禁用的插件。它们装进 node_modules 与 bundles，由 profile 的
 # cordis.patch.yml 关掉，这样操作员要用的那天在设置里打开即可，不必重装。
-#   dsh-dream-skin 会替换整个外观；首次部署先保持 DSH 内置外观。
-DISABLED="dream-skin"
+# 注意：这里写的是 **bundle entry 的 id**，不是包名（两者不一定相同）。
+#   dream-skin    -> dsh-dream-skin   会替换整个外观；首次部署先保持内置外观
+#   dsh-market    -> dshmarket        插件市场（装/更新/检查更新需要联网，离线用不上）
+DISABLED="dream-skin dsh-market"
 
 # 已被取代的包名。profile 是持久的，升级时旧条目会留在 bundles 与 node_modules
 # 里；覆盖安装后那个路径已不存在，每次启动都会报
@@ -101,12 +103,25 @@ for (const plugin of plugins) manifest.dependencies[plugin.name] = plugin.versio
 manifest.dsh = { ...manifest.dsh };
 manifest.dsh.profile = { ...manifest.dsh.profile };
 const current = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles.slice() : base.slice();
-// 先摘掉退役名，再补齐当前清单。不摘的话旧条目会一直留在持久 profile 里，
-// 每次启动报一条 skipping profile bundle。
-const bundles = current.filter((name) => !retired.has(name));
-// 追加在末尾，让插件的 patch 层最后应用，可以覆盖基础层。
-for (const name of [...base, ...plugins.map((plugin) => plugin.name)]) {
-  if (!bundles.includes(name)) bundles.push(name);
+// 先摘掉退役名，再按**确定性顺序**重排：官方核心 → 清单顺序（BUNDLES）→ 操作员自己加的。
+// 不能"保留旧顺序 + 追加缺失项"：持久 profile 的顺序来自上一次播种（甚至是出厂模板），
+// 新加的 bundle 会被排到中间。dsh-ga-controller 这类层要求最后应用的插件就会失效。
+const retiredFiltered = current.filter((name) => !retired.has(name));
+const managed = plugins.map((plugin) => plugin.name);
+const isCore = (name) => name.startsWith("@deepseek-ai/");
+const core = retiredFiltered.filter(isCore);
+const managedOrdered = managed.filter((name) => retiredFiltered.includes(name));
+const extras = retiredFiltered.filter((name) => !isCore(name) && !managed.includes(name));
+// 去重：core 里已经包含 base/web-app，managedOrdered 只补插件名，不能重复 push。
+const bundles = [...new Set([...core, ...managedOrdered, ...extras])];
+// 明确要求"必须最后"的包：即使操作员后来追加了插件，也把它挪到末端。
+const TAIL = ["dsh-ga-controller"];
+for (const name of TAIL) {
+  const at = bundles.indexOf(name);
+  if (at !== -1 && at !== bundles.length - 1) {
+    bundles.splice(at, 1);
+    bundles.push(name);
+  }
 }
 manifest.dsh.profile.bundles = bundles;
 fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");

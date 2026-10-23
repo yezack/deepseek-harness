@@ -277,14 +277,17 @@ else
     fi
     echo "      播种 profile（用户 $TARGET_USER）..."
     if [ "$(id -u)" = "0" ] && [ "$TARGET_USER" != "root" ]; then
-      SEED_OK=0
+      # 先收输出再打印：管道会把退出码替换成 sed 的，失败会被静默吞掉（踩过）。
       if command -v sudo >/dev/null 2>&1; then
-        sudo -u "$TARGET_USER" -H env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
-          "$DEST/seed-profile.sh" "$DEST" 2>&1 | sed 's/^/      /' || SEED_OK=$?
+        SEED_OUT="$(sudo -u "$TARGET_USER" -H env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
+          "$DEST/seed-profile.sh" "$DEST" 2>&1)"
+        SEED_OK=$?
       else
-        runuser -u "$TARGET_USER" -- env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
-          "$DEST/seed-profile.sh" "$DEST" 2>&1 | sed 's/^/      /' || SEED_OK=$?
+        SEED_OUT="$(runuser -u "$TARGET_USER" -- env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
+          "$DEST/seed-profile.sh" "$DEST" 2>&1)"
+        SEED_OK=$?
       fi
+      printf '%s\n' "$SEED_OUT" | sed 's/^/      /'
       if [ "${SEED_OK:-0}" = "0" ]; then
         echo "      profile 已就绪: $PROFILE_DIR"
       else

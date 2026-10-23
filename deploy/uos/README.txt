@@ -174,14 +174,17 @@
   dsh-better-sidebar 的可选 peer）：
     @huanlin/dsh-plugin-better-locale      0.4.3
 
-  dsh-dream-skin 预装但**默认关闭**：它会替换整个外观，首次部署先保持 DSH 内置
-  外观。关闭是通过 profile 的 cordis.patch.yml 里一段标记块实现的，由
-  seed-profile.sh 维护：
+    dsh-dream-skin 与 dshmarket 预装但**默认关闭**：前者会替换整个外观（首次部署先
+    保持 DSH 内置外观），后者的插件市场/检查更新需要联网（离线环境用不上）。
+    关闭是通过 profile 的 cordis.patch.yml 里一段标记块实现的，由 seed-profile.sh
+    维护（这里写的是 bundle entry 的 id，dshmarket 的 id 是 dsh-market）：
 
-      # >>> dsh-offline: default-disabled plugins
-      - id: dream-skin
-        disabled: true
-      # <<< dsh-offline: default-disabled plugins
+        # >>> dsh-offline: default-disabled plugins
+        - id: dream-skin
+          disabled: true
+        - id: dsh-market
+          disabled: true
+        # <<< dsh-offline: default-disabled plugins
 
   要用的时候把这一段（或其中那一项）删掉再重启即可，不需要重装。该块是幂等的，
   每次重跑只替换自己那一段，文件里其他内容（比如手工加的 webserver 覆盖）原样保留。
