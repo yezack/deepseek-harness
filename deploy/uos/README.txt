@@ -402,3 +402,17 @@
                                  早于偏移 28838 的 head 注入行与
                                  偏移 33284 的 parser-blocking bundle）
 ================================================================
+
+自动升级（可选，默认开启检查）
+  客户端只做普通 GET：启动时检查一次、之后每小时静默检查；托盘「检查更新」可手动触发。
+  强制更新由清单里的 minVersion 判定：本机版本低于它时**不启动 DSH 本体**，
+  只显示强制更新窗口（唯一动作「立即更新」）。
+
+  默认更新服务器（可在安装时用 DSH_UPDATE_URL 覆盖，或改 /deepseek-harness/update.json）:
+      http://autoupdate.kxzd.sjq.sh/deepseek_harness/latest.json
+
+  服务端只需两个静态文件：
+      latest.json            { version, dshVersion, sha256, size, url, publishedAt, minVersion, notes }
+      dsh-uos-offline.tar.gz 包本体（url 用相对名）
+  升级过程：下载 → sha256+大小校验 → 备份当前安装 → install.sh --upgrade → 自动重启；
+  失败自动回滚到备份。

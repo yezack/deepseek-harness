@@ -29,13 +29,17 @@ function readJson(file) {
   }
 }
 
-/** 更新配置：只有 manifestUrl（安装时用 DSH_UPDATE_URL 写入，或手工写 update.json）。 */
+// 默认升级服务器（未在 update.json / DSH_UPDATE_URL 里指定时使用）。
+// latest.json 里的 url 是相对名，会按这个地址解析。
+const DEFAULT_MANIFEST_URL = 'http://autoupdate.kxzd.sjq.sh/deepseek_harness/latest.json'
+
+/** 更新配置：update.json 的 manifestUrl > 环境变量 DSH_UPDATE_URL > 内置默认服务器。 */
 function updateConfig() {
   const config = readJson(CONFIG_FILE) ?? {}
-  const manifestUrl = typeof config.manifestUrl === 'string' && config.manifestUrl.trim() !== ''
-    ? config.manifestUrl.trim()
-    : (process.env.DSH_UPDATE_URL || '').trim()
-  return manifestUrl === '' ? null : { manifestUrl }
+  const fromConfig = typeof config.manifestUrl === 'string' ? config.manifestUrl.trim() : ''
+  const fromEnv = (process.env.DSH_UPDATE_URL || '').trim()
+  const manifestUrl = fromConfig !== '' ? fromConfig : (fromEnv !== '' ? fromEnv : DEFAULT_MANIFEST_URL)
+  return { manifestUrl, source: fromConfig !== '' ? 'update.json' : (fromEnv !== '' ? 'env' : 'default') }
 }
 
 function installedVersion() {

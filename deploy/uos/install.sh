@@ -4,6 +4,8 @@ set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="${DSH_DEST:-/deepseek-harness}"
 INSTALL_NODE_DIR="/var/tmp/dsh-node"
+# 默认升级服务器（可用 DSH_UPDATE_URL 覆盖）。写入客户端 update.json，托盘「检查更新」从这里取清单。
+DEFAULT_UPDATE_URL="http://autoupdate.kxzd.sjq.sh/deepseek_harness/latest.json"
 
 # --upgrade：由桌面壳的"检查更新"调用。语义区别只有三点：
 #   1) 不询问浏览器升级（沿用现有浏览器）；
@@ -538,13 +540,13 @@ cat > "$DEST/.installed-version" <<VERSIONFILE
   "mode": "$([ "$UPGRADE" = "1" ] && echo upgrade || echo fresh)"
 }
 VERSIONFILE
-# 更新源：安装时用 DSH_UPDATE_URL 指定内网静态服务器上的 latest.json。
-# 客户端只做普通 GET（服务端就是静态文件服务器），所以只记一个 URL。
-# 升级安装时保留已有配置（操作员可能已经写好）。
+# 更新源：客户端只做普通 GET（服务端就是静态文件服务器），所以只记一个 URL。
+# 优先级：DSH_UPDATE_URL（安装时显式指定）> 已有 update.json（升级时保留）> 内置默认服务器。
+UPDATE_URL_EFFECTIVE="${DSH_UPDATE_URL:-$DEFAULT_UPDATE_URL}"
 if [ -n "${DSH_UPDATE_URL:-}" ]; then
   printf '{\n  "manifestUrl": "%s"\n}\n' "$DSH_UPDATE_URL" > "$DEST/update.json"
-elif [ ! -f "$DEST/update.json" ]; then
-  printf '{\n  "manifestUrl": ""\n}\n' > "$DEST/update.json"
+elif [ ! -f "$DEST/update.json" ] || ! grep -q '"manifestUrl"[[:space:]]*:[[:space:]]*"[^"]' "$DEST/update.json" 2>/dev/null; then
+  printf '{\n  "manifestUrl": "%s"\n}\n' "$DEFAULT_UPDATE_URL" > "$DEST/update.json"
 fi
 
 echo
@@ -560,9 +562,8 @@ if [ "${DESKTOP_OK:-0}" = "1" ]; then
 fi
 echo "  局域网访问: sudo $DEST/enable-lan.sh   （0.2.1 需 DNAT 才能同时服务回环与局域网）"
 echo "  兼容运行时: $NODE_GLIBC   （新 glibc，供 univer 等插件子进程）"
-if [ -n "${DSH_UPDATE_URL:-}" ]; then
-  echo "  更新源:    $DSH_UPDATE_URL   （托盘「检查更新」使用）"
-else
-  echo "  更新源:    未配置（安装时 DSH_UPDATE_URL=… 可启用托盘「检查更新」）"
+echo "  更新源:    $UPDATE_URL_EFFECTIVE"
+if [ -z "${DSH_UPDATE_URL:-}" ]; then
+  echo "             （默认服务器；可用 DSH_UPDATE_URL=… 覆盖，登录后也可改 /deepseek-harness/update.json）"
 fi
 echo "============================================"
