@@ -7,7 +7,7 @@
 //     退出时结束整个进程组；关窗口只是隐藏到托盘，服务继续运行。
 //
 // 托盘：打开 Agent（显示并聚焦窗口）/ 在浏览器打开 / 重启服务 / 退出。
-const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, shell } = require('electron')
 const { spawn, execFileSync } = require('node:child_process')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -232,10 +232,20 @@ function buildTray() {
   tray.on('click', () => openAgent())
 }
 
-// ===== 自动升级（方案 1：内网静态清单 + 壳内驱动） =====
+// ===== 自动升级（内网静态清单 + 壳内驱动） =====
+// 规则：
+//   - 启动时检查一次；运行中每 1 小时静默检查；托盘可手动检查；
+//   - 强制更新由清单的 minVersion 判定：本机版本 < minVersion 时**不启动 DSH 本体**，
+//     直接显示强制更新窗口；
+//   - 普通（建议）更新在对话框里问一句。
 const AUTO = process.env.DSH_DESKTOP_AUTOTEST === 'update'
+const CHECK_INTERVAL_MS = 60 * 60 * 1000
 let upgrading = false
 let progressWindow = null
+let forcedWindow = null
+let forcedState = null
+let pendingUpdate = null
+let periodicTimer = null
 
 function createProgressWindow() {
   progressWindow = new BrowserWindow({
@@ -275,46 +285,56 @@ function notify(message, detail, isError = false) {
   else dialog.showMessageBoxSync({ type: 'info', title: '检查更新', message, detail })
 }
 
-async function checkForUpdates() {
+// ---- 强制更新窗口（不启动 DSH 本体时显示） ----
+function showForcedWindow(state) {
+  forcedState = state
+  if (forcedWindow !== null) {
+    forcedWindow.show()
+    forcedWindow.focus()
+    return
+  }
+  forcedWindow = new BrowserWindow({
+    width: 760,
+    height: 540,
+    title: '需要更新后才能继续使用',
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  })
+  forcedWindow.on('closed', () => { forcedWindow = null })
+  void forcedWindow.loadFile(path.join(__dirname, 'forced.html'))
+}
+
+ipcMain.on('force-data', (event) => {
+  const state = forcedState
+  event.returnValue = state === null
+    ? {}
+    : {
+        installed: state.installed?.version ?? 'unknown',
+        minVersion: state.manifest.minVersion ?? '',
+        latest: state.manifest.version,
+        dshVersion: state.manifest.dshVersion ?? '',
+        notes: state.manifest.notes ?? '',
+      }
+})
+ipcMain.on('force-upgrade', () => {
+  if (forcedState !== null) void upgradeAndRestart(forcedState)
+})
+ipcMain.on('force-quit', () => quitApplication())
+
+/** 执行升级：进度窗 → 下载校验 → 备份安装 → 重启。 */
+async function upgradeAndRestart(result) {
   if (upgrading) return
   upgrading = true
   let progressReady = false
   try {
-    const result = await updater.check({ log })
-    if (result.status === 'no-config') {
-      notify('未配置更新源', result.message)
-      return
-    }
-    if (result.status === 'error') {
-      notify('检查更新失败', result.message, true)
-      return
-    }
-    if (result.status === 'up-to-date') {
-      notify(result.message)
-      return
-    }
     const manifest = result.manifest
-    const detail = [
-      `当前版本: ${result.installed?.version ?? '未知'}`,
-      `新版本:   ${manifest.version}`,
-      manifest.dshVersion ? `dsh:      ${manifest.dshVersion}` : '',
-      manifest.publishedAt ? `发布时间: ${manifest.publishedAt}` : '',
-      manifest.notes ? `\n更新说明:\n${manifest.notes}` : '',
-    ].filter(Boolean).join('\n')
-    if (!AUTO) {
-      const answer = dialog.showMessageBoxSync({
-        type: 'question',
-        title: '发现新版本',
-        message: `发现新版本 ${manifest.version}`,
-        detail,
-        buttons: ['现在升级', '稍后'],
-        defaultId: 0,
-        cancelId: 1,
-      })
-      if (answer !== 0) return
-    } else {
-      log(`autotest: 跳过确认，直接升级到 ${manifest.version}`)
-    }
     await createProgressWindow()
     progressReady = true
     reportProgress({ received: 0, total: manifest.size })
@@ -334,6 +354,94 @@ async function checkForUpdates() {
   } finally {
     upgrading = false
   }
+}
+
+/** 手动 / 每小时静默检查。silent=true 时只有强制更新才打扰用户。 */
+async function checkForUpdates({ silent = false } = {}) {
+  if (upgrading) return
+  const result = await updater.check({ log })
+  if (result.status === 'no-config') {
+    if (!silent) notify('未配置更新源', result.message)
+    return
+  }
+  if (result.status === 'error') {
+    if (!silent) notify('检查更新失败', result.message, true)
+    return
+  }
+  if (result.status === 'up-to-date') {
+    if (!silent) notify(result.message)
+    return
+  }
+  if (result.forced) {
+    log('check: 命中强制更新（停止服务并显示强制更新窗口）')
+    await stopServer()
+    showForcedWindow(result)
+    return
+  }
+  pendingUpdate = result
+  if (silent) {
+    log(`check: 发现新版本 ${result.manifest.version}（静默，等用户从托盘升级）`)
+    return
+  }
+  if (AUTO) {
+    log('autotest: 跳过确认，直接升级')
+    await upgradeAndRestart(result)
+    return
+  }
+  const manifest = result.manifest
+  const detail = [
+    `当前版本: ${result.installed?.version ?? '未知'}`,
+    `新版本:   ${manifest.version}`,
+    manifest.dshVersion ? `dsh:      ${manifest.dshVersion}` : '',
+    manifest.publishedAt ? `发布时间: ${manifest.publishedAt}` : '',
+    manifest.notes ? `\n更新说明:\n${manifest.notes}` : '',
+  ].filter(Boolean).join('\n')
+  const answer = dialog.showMessageBoxSync({
+    type: 'question',
+    title: '发现新版本',
+    message: `发现新版本 ${manifest.version}`,
+    detail,
+    buttons: ['现在升级', '稍后'],
+    defaultId: 0,
+    cancelId: 1,
+  })
+  if (answer === 0) await upgradeAndRestart(result)
+}
+
+/**
+ * 启动闸门。返回 true = 正常启动 DSH 本体；false = 已进入强制更新界面。
+ * 拉不到清单时按"离线可用"处理（不能因为更新服务器挂了就让所有人开不了机）。
+ */
+async function startupGate() {
+  let result
+  try {
+    result = await updater.check({ log })
+  } catch (error) {
+    log(`startup: 更新检查异常（按离线继续）: ${error.message}`)
+    return true
+  }
+  if (result.status === 'available' && result.forced) {
+    log(`startup: 强制更新 本地 ${result.installed?.version ?? 'unknown'} < 最低 ${result.manifest.minVersion}`)
+    showForcedWindow(result)
+    return false
+  }
+  if (result.status === 'available') {
+    pendingUpdate = result
+    log(`startup: 发现新版本 ${result.manifest.version}`)
+  } else if (result.status === 'up-to-date') {
+    log('startup: 已是最新')
+  } else if (result.status === 'error') {
+    log(`startup: 更新检查失败（按离线继续）: ${result.message}`)
+  } else {
+    log('startup: 未配置更新源')
+  }
+  return true
+}
+
+function startPeriodicCheck() {
+  if (periodicTimer !== null) return
+  periodicTimer = setInterval(() => { void checkForUpdates({ silent: true }) }, CHECK_INTERVAL_MS)
+  log('update: 每小时静默检查已启用')
 }
 
 function quitApplication() {
@@ -358,8 +466,20 @@ if (!gotLock) {
   app.on('window-all-closed', () => { /* 托盘常驻 */ })
   app.whenReady().then(async () => {
     buildTray()
+    // 启动闸门：命中强制更新时不启动 DSH 本体，只显示强制更新窗口。
+    const shouldStartServer = await startupGate()
+    if (!shouldStartServer) {
+      log('startup: 强制更新模式（未启动 DSH 本体）')
+      return
+    }
     createWindow()
     await loadUi()
+    startPeriodicCheck()
+    // 启动时发现"建议更新"：问一次（AUTO 演练则直接升级）。
+    if (pendingUpdate !== null) {
+      log('startup: 提示建议更新')
+      void checkForUpdates()
+    }
     // 自动验收（仅测试用）：验证"在浏览器打开"与"退出即结束整个服务进程"两条路径。
     if (process.env.DSH_DESKTOP_AUTOTEST === 'quit') {
       log('autotest: openInBrowser then quit')

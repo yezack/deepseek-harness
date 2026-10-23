@@ -43,6 +43,28 @@ function installedVersion() {
   return state && typeof state.version === 'string' ? state : null
 }
 
+/** 版本比较：构建号形如 20261023.1900，按数字段比较（缺失段按 0）。 */
+function compareVersions(left, right) {
+  const parse = (value) => String(value ?? '').split(/[^0-9]+/u).filter((part) => part !== '').map(Number)
+  const a = parse(left)
+  const b = parse(right)
+  const length = Math.max(a.length, b.length)
+  for (let index = 0; index < length; index += 1) {
+    const x = a[index] ?? 0
+    const y = b[index] ?? 0
+    if (x !== y) return x < y ? -1 : 1
+  }
+  return 0
+}
+
+/** 是否必须升级：manifest 给了 minVersion 且本机版本低于它（本机版本未知时也视为必须）。 */
+function isForced(manifest, installed) {
+  const minVersion = typeof manifest?.minVersion === 'string' ? manifest.minVersion.trim() : ''
+  if (minVersion === '') return false
+  if (installed === null) return true
+  return compareVersions(installed.version, minVersion) < 0
+}
+
 function requestModule(url) {
   return new URL(url).protocol === 'https:' ? https : http
 }
@@ -151,10 +173,11 @@ async function check({ log }) {
   const installed = installedVersion()
   const current = installed?.version ?? 'unknown'
   log?.(`check: 远端 ${manifest.version} / 本地 ${current}`)
+  const forced = isForced(manifest, installed)
   if (installed !== null && manifest.version === current) {
-    return { status: 'up-to-date', manifest, installed, message: `已是最新版本（${current}）` }
+    return { status: 'up-to-date', manifest, installed, forced, message: `已是最新版本（${current}）` }
   }
-  return { status: 'available', manifest, installed, config }
+  return { status: 'available', manifest, installed, forced, config }
 }
 
 /** 下载 + 校验。返回 tarball 路径。 */
@@ -221,4 +244,4 @@ function installPackage(tarball, { config, log, onProgress }) {
   return installedVersion()
 }
 
-module.exports = { check, fetchPackage, installPackage, updateConfig, installedVersion, STAGE_DIR }
+module.exports = { check, fetchPackage, installPackage, updateConfig, installedVersion, compareVersions, isForced, STAGE_DIR }

@@ -82,6 +82,9 @@ tar czf dsh-uos-offline.tar.gz -C "$BUILD" package
 DSH_VER="$("$BUILD/node/bin/node" -p "require('$BUILD/app/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
 PKG_SHA="$(sha256sum "$BUILD/dsh-uos-offline.tar.gz" | cut -d' ' -f1)"
 PKG_SIZE="$(stat -c%s "$BUILD/dsh-uos-offline.tar.gz")"
+# minVersion：低于它的客户端会被判定为"强制更新"（不启动 DSH，只显示强制更新窗口）。
+# 留空 = 本包不强制任何版本；发布时可用 DSH_MIN_VERSION 指定（通常写"上一个版本"）。
+PKG_MIN_VERSION="${DSH_MIN_VERSION:-}"
 cat > "$BUILD/latest.json" <<JSON
 {
   "version": "$PKG_VERSION",
@@ -90,6 +93,7 @@ cat > "$BUILD/latest.json" <<JSON
   "size": $PKG_SIZE,
   "url": "dsh-uos-offline.tar.gz",
   "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "minVersion": "$PKG_MIN_VERSION",
   "notes": ""
 }
 JSON
