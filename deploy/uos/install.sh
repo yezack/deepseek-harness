@@ -298,6 +298,58 @@ else
   fi
 fi
 
+# ============ 可选桌面壳（Electron：主窗口 + 托盘，接管服务进程） ============
+# 只替代浏览器：窗口加载 127.0.0.1:3080；服务由壳拉起，退出壳时结束整个进程组。
+# 托盘：打开 Agent / 在浏览器打开 / 重启服务 / 退出。
+ELECTRON_DIR="/var/tmp/dsh-electron"
+DESKTOP_OK=0
+if [ "${DSH_DESKTOP:-1}" != "0" ] && [ -f "$HERE/desktop/electron-v44.7.0-linux-x64.zip" ] && [ -f "$HERE/desktop/app/main.js" ]; then
+  echo "      安装桌面壳（Electron）..."
+  rm -rf "$ELECTRON_DIR"
+  mkdir -p "$ELECTRON_DIR"
+  unzip -q -o "$HERE/desktop/electron-v44.7.0-linux-x64.zip" -d "$ELECTRON_DIR"
+  [ -f "$ELECTRON_DIR/electron" ] && chmod 755 "$ELECTRON_DIR/electron"
+  cp -r "$HERE/desktop/app" "$ELECTRON_DIR/app"
+  # 壳要以桌面用户身份运行：目录与文件必须对该用户可读（cp -r 会保留来源的 600 权限），
+  # 可执行位也必须显式补上——否则 electron 报 "EACCES: permission denied, open .../package.json"。
+  chown -R "${TARGET_USER:-root}":"$(id -gn "${TARGET_USER:-root}" 2>/dev/null || echo root)" "$ELECTRON_DIR" 2>/dev/null || true
+  chmod -R a+rX "$ELECTRON_DIR" 2>/dev/null || true
+  chmod 755 "$ELECTRON_DIR/electron" 2>/dev/null || true
+  cat > "$DEST/desktop.sh" <<DESKTOP_LAUNCH
+#!/bin/bash
+# DeepSeek Harness 桌面壳启动器：主窗口 + 托盘常驻；Web 服务由壳接管（退出即结束）。
+export DISPLAY="\${DISPLAY:-:0}"
+export DSH_DEST="$DEST"
+export DSH_HOME="\${DSH_HOME:-\$HOME/.dsh}"
+exec "$ELECTRON_DIR/electron" --no-sandbox "$ELECTRON_DIR/app" "\$@"
+DESKTOP_LAUNCH
+  chmod 755 "$DEST/desktop.sh"
+  if [ -n "${TARGET_USER:-}" ] && [ "$TARGET_USER" != "root" ] && [ -n "${TARGET_HOME:-}" ]; then
+    APPS_DIR="$TARGET_HOME/.local/share/applications"
+    TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")"
+    install -d -m 755 -o "$TARGET_USER" -g "$TARGET_GROUP" "$APPS_DIR" 2>/dev/null || true
+    cat > "$APPS_DIR/dsh-desktop.desktop" <<DESKTOP_ENTRY
+[Desktop Entry]
+Type=Application
+Name=DeepSeek Harness
+Comment=DeepSeek Harness 桌面客户端（托盘常驻，退出即停止服务）
+Exec=$DEST/desktop.sh
+Icon=$ELECTRON_DIR/app/tray.png
+Terminal=false
+Categories=Development;
+DESKTOP_ENTRY
+    chown "$TARGET_USER":"$TARGET_GROUP" "$APPS_DIR/dsh-desktop.desktop" 2>/dev/null || true
+    chmod 644 "$APPS_DIR/dsh-desktop.desktop"
+    echo "      桌面入口: $APPS_DIR/dsh-desktop.desktop"
+  fi
+  DESKTOP_OK=1
+  echo "      桌面壳: $DEST/desktop.sh"
+elif [ "${DSH_DESKTOP:-1}" = "0" ]; then
+  echo "      [提示] DSH_DESKTOP=0，跳过桌面壳"
+else
+  echo "      [提示] 包内没有 desktop/ 载荷，跳过桌面壳"
+fi
+
 # 生成启动前的只读预检脚本（不修改任何文件；只报告问题并给出修复命令）。
 cat > "$DEST/preflight.sh" <<'PREFLIGHT_TEMPLATE'
 #!/bin/bash
@@ -429,6 +481,9 @@ echo "  启动 Web:  $DEST/start-web.sh"
 echo "  浏览器访问: http://127.0.0.1:3080/"
 echo "  部署自检:  $DEST/doctor.sh        （PASS/WARN/FAIL 体检）"
 echo "  日志打包:  $DEST/collect-logs.sh  （排查问题时发给开发侧）"
+if [ "${DESKTOP_OK:-0}" = "1" ]; then
+  echo "  桌面客户端: $DEST/desktop.sh      （主窗口 + 托盘；退出即停止服务）"
+fi
 echo "  局域网访问: sudo $DEST/enable-lan.sh   （0.2.1 需 DNAT 才能同时服务回环与局域网）"
 echo "  兼容运行时: $NODE_GLIBC   （新 glibc，供 univer 等插件子进程）"
 echo "============================================"

@@ -40,6 +40,17 @@ done
 [ -f "$PKG/maintain-profile.mjs" ] && chmod 644 "$PKG/maintain-profile.mjs"
 chmod 644 "$PKG/README.txt"
 
+# 可选：桌面壳载荷（Electron 运行时 + 壳应用）。窗口/托盘接管服务进程，不碰 Web 侧。
+if [ -d "$BUILD/desktop" ]; then
+  mkdir -p "$PKG/desktop"
+  [ -d "$BUILD/desktop/app" ] && cp -r "$BUILD/desktop/app" "$PKG/desktop/"
+  ELECTRON_ZIP="$(ls "$BUILD"/desktop/electron-v*-linux-x64.zip 2>/dev/null | head -1)"
+  if [ -n "$ELECTRON_ZIP" ]; then
+    cp "$ELECTRON_ZIP" "$PKG/desktop/"
+    echo "  携带桌面壳: $(basename "$ELECTRON_ZIP") ($(du -h "$ELECTRON_ZIP" | cut -f1))"
+  fi
+fi
+
 # 可选：随包携带系统浏览器升级包。把 deb 放在 build-dir/browser/ 下即会被打包；
 # install.sh 只在目标机已装同一浏览器且版本更低时询问是否升级。
 # deb 来源： apt-get download org.deepin.browser   （UOS 官方仓库）

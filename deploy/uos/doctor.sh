@@ -28,7 +28,7 @@ echo "  DSH_HOME: ${DSH_HOME:-$HOME/.dsh}"
 echo "============================================"
 
 echo
-echo "[1/8] 系统与运行时"
+echo "[1/9] 系统与运行时"
 GLIBC="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
 echo "      glibc: ${GLIBC:-未知}"
 if [ -x "$NODE_BIN" ]; then
@@ -48,7 +48,7 @@ else
 fi
 
 echo
-echo "[2/8] 原生模块（dlopen 实测）"
+echo "[2/9] 原生模块（dlopen 实测）"
 NM_FAIL=0
 for mod in \
   "@univerjs-pro/engine-formula-rust-binding" \
@@ -70,7 +70,7 @@ done
 [ "$NM_FAIL" -eq 0 ] && ok "核心原生模块全部可加载" || bad "$NM_FAIL 个核心原生模块加载失败"
 
 echo
-echo "[3/8] 预装插件版本（对比安装包清单）"
+echo "[3/9] 预装插件版本（对比安装包清单）"
 if [ -f "$DEST/seed-profile.sh" ]; then
   BUNDLES="$(grep -m1 '^BUNDLES=' "$DEST/seed-profile.sh" | sed -E 's/^BUNDLES="//; s/"$//')"
   if [ -z "$BUNDLES" ]; then
@@ -95,7 +95,7 @@ else
 fi
 
 echo
-echo "[4/8] 浏览器"
+echo "[4/9] 浏览器"
 SYS_BROWSER=""
 for candidate in /usr/share/browser/browser /usr/bin/browser; do
   [ -x "$candidate" ] && { SYS_BROWSER="$candidate"; break; }
@@ -123,7 +123,7 @@ else
 fi
 
 echo
-echo "[5/8] 服务状态"
+echo "[5/9] 服务状态"
 if ss -ltn 2>/dev/null | grep -q ':3080'; then
   BIND="$(ss -ltn 2>/dev/null | grep ':3080' | awk '{print $4}' | head -1)"
   ok "监听 $BIND"
@@ -151,7 +151,7 @@ else
 fi
 
 echo
-echo "[6/8] 网络（局域网访问）"
+echo "[6/9] 网络（局域网访问）"
 LAN_IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.' | head -1)"
 [ -n "$LAN_IP" ] && echo "      局域网 IP: $LAN_IP" || warn "没有局域网 IPv4 地址"
 if sudo -n iptables -t nat -S >/dev/null 2>&1; then
@@ -163,7 +163,7 @@ else
 fi
 
 echo
-echo "[7/8] profile 配置"
+echo "[7/9] profile 配置"
 PATCH="$PROFILE_HOME/cordis.patch.yml"
 if [ -f "$PATCH" ]; then
   ok "存在 $PATCH"
@@ -244,7 +244,7 @@ else
 fi
 
 echo
-echo "[8/8] 兼容运行时（新 glibc，供插件子进程）"
+echo "[8/9] 兼容运行时（新 glibc，供插件子进程）"
 GLIBC_DIR="/var/tmp/dsh-glibc"
 NODE_GLIBC="/var/tmp/dsh-node/bin/node-glibc"
 if [ -x "$GLIBC_DIR/ld-linux-x86-64.so.2" ] && [ -x "$NODE_GLIBC" ]; then
@@ -273,6 +273,23 @@ if [ -x "$GLIBC_DIR/ld-linux-x86-64.so.2" ] && [ -x "$NODE_GLIBC" ]; then
   fi
 else
   warn "没有兼容运行时（/var/tmp/dsh-glibc 或 node-glibc 缺失）"
+fi
+
+echo
+echo "[9/9] 桌面壳（可选，Electron：主窗口 + 托盘）"
+ELECTRON_DIR="/var/tmp/dsh-electron"
+if [ -x "$ELECTRON_DIR/electron" ] && [ -f "$ELECTRON_DIR/app/main.js" ]; then
+  ok "桌面壳已安装: Electron $("$ELECTRON_DIR/electron" --no-sandbox --version 2>/dev/null | head -1)"
+  if [ -f "$DEST/desktop.sh" ]; then ok "启动器: $DEST/desktop.sh"; else warn "缺少 $DEST/desktop.sh"; fi
+  if ldconfig -p 2>/dev/null | grep -qi 'appindicator'; then
+    ok "托盘库存在（libappindicator/ayatana）"
+  else
+    warn "缺少 libappindicator（托盘图标可能不显示）"
+  fi
+  ENTRY="$HOME/.local/share/applications/dsh-desktop.desktop"
+  if [ -f "$ENTRY" ]; then ok "桌面入口: $ENTRY"; else warn "没有桌面入口（可直接运行 desktop.sh）"; fi
+else
+  warn "未安装桌面壳（安装时 DSH_DESKTOP=1 可启用）"
 fi
 
 echo

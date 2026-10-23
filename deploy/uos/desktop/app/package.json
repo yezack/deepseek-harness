@@ -1,0 +1,7 @@
+{
+  "name": "dsh-desktop-shell",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Thin Electron shell for DeepSeek Harness: owns the web service process, shows a main window and a tray menu.",
+  "main": "main.js"
+}

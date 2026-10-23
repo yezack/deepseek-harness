@@ -71,6 +71,22 @@
   工作，升级只是为了摆脱对兼容层的依赖。
   重新获取该 deb： apt-get download org.deepin.browser
 
+桌面壳（可选，Electron：主窗口 + 托盘）
+  只替代浏览器，不复制前端：窗口直接加载 http://127.0.0.1:3080/?token=...，
+  profile / 插件 / 兼容运行时完全沿用。但**接管整个服务进程**：
+  服务由壳拉起（start-web.sh --no-open），托盘"退出"会结束整个进程组。
+
+    启动:        /deepseek-harness/desktop.sh
+    桌面菜单:    ~/.local/share/applications/dsh-desktop.desktop
+    托盘菜单:    打开 Agent（显示并聚焦窗口）/ 在浏览器打开 / 重启服务 / 退出
+    关窗口:      隐藏到托盘，服务继续运行
+    日志:        ~/.dsh-desktop.log
+
+  安装：install.sh 默认安装（`DSH_DESKTOP=0` 跳过）。Electron 运行时解到
+  /var/tmp/dsh-electron（白名单路径），主窗口用 `--no-sandbox` 启动——
+  本机 chrome-sandbox 需要 root SUID，内网可信机器上可接受。
+  已验证（UOS 20 / glibc 2.28）：Electron 44.7.0 可运行（其自身只需 GLIBC_2.25）、
+  DDE 托盘通过 StatusNotifierItem 注册、退出后服务进程组被结束且端口释放。
 启动
   /deepseek-harness/start-web.sh
   它会在控制台打印一行带 token 的地址，例如：
