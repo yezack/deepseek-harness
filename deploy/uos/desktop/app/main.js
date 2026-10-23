@@ -12,6 +12,7 @@ const { spawn, execFileSync } = require('node:child_process')
 const fs = require('node:fs')
 const http = require('node:http')
 const path = require('node:path')
+const updater = require('./updater')
 
 const DEST = process.env.DSH_DEST || '/deepseek-harness'
 const PORT = Number(process.env.DSH_PORT || 3080)
@@ -217,14 +218,122 @@ function buildTray() {
   const image = nativeImage.createFromPath(path.join(__dirname, 'tray.png'))
   tray = new Tray(image)
   tray.setToolTip('DeepSeek Harness')
+  const installed = updater.installedVersion()
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开 Agent', click: () => openAgent() },
     { label: '在浏览器打开', click: () => openInBrowser() },
     { type: 'separator' },
+    { label: '检查更新', click: () => { void checkForUpdates() } },
     { label: '重启服务', click: () => { void restartServer() } },
+    { type: 'separator' },
+    { label: `当前版本: ${installed?.version ?? '未知'}`, enabled: false },
     { label: '退出', click: () => quitApplication() },
   ]))
   tray.on('click', () => openAgent())
+}
+
+// ===== 自动升级（方案 1：内网静态清单 + 壳内驱动） =====
+const AUTO = process.env.DSH_DESKTOP_AUTOTEST === 'update'
+let upgrading = false
+let progressWindow = null
+
+function createProgressWindow() {
+  progressWindow = new BrowserWindow({
+    width: 460,
+    height: 190,
+    title: '正在升级 DeepSeek Harness',
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    alwaysOnTop: true,
+    autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  })
+  progressWindow.loadFile(path.join(__dirname, 'progress.html'))
+  return new Promise((resolve) => { progressWindow.webContents.once('did-finish-load', resolve) })
+}
+
+function reportProgress(progress) {
+  if (progressWindow === null) return
+  const ratio = progress.total ? progress.received / progress.total : progress.phase === 'installing' ? 1 : 0
+  const label = progress.phase === 'installing'
+    ? '正在安装（约 3–5 分钟，请勿关闭）'
+    : `${(progress.received / 1048576).toFixed(1)} / ${((progress.total ?? 0) / 1048576).toFixed(1)} MB`
+  const title = progress.phase === 'installing' ? '正在安装升级包…' : '正在下载升级包…'
+  progressWindow?.webContents
+    .executeJavaScript(`window.setProgress(${ratio}, ${JSON.stringify(label)}); window.setPhase(${JSON.stringify(title)})`)
+    .catch(() => {})
+}
+
+/** 统一提示：AUTO（无人值守演练）模式下只写日志，不弹窗。 */
+function notify(message, detail, isError = false) {
+  if (AUTO) {
+    log(`notify${isError ? '[error]' : ''}: ${message}${detail ? ` / ${detail}` : ''}`)
+    return
+  }
+  if (isError) dialog.showErrorBox(message, detail ?? '')
+  else dialog.showMessageBoxSync({ type: 'info', title: '检查更新', message, detail })
+}
+
+async function checkForUpdates() {
+  if (upgrading) return
+  upgrading = true
+  let progressReady = false
+  try {
+    const result = await updater.check({ log })
+    if (result.status === 'no-config') {
+      notify('未配置更新源', result.message)
+      return
+    }
+    if (result.status === 'error') {
+      notify('检查更新失败', result.message, true)
+      return
+    }
+    if (result.status === 'up-to-date') {
+      notify(result.message)
+      return
+    }
+    const manifest = result.manifest
+    const detail = [
+      `当前版本: ${result.installed?.version ?? '未知'}`,
+      `新版本:   ${manifest.version}`,
+      manifest.dshVersion ? `dsh:      ${manifest.dshVersion}` : '',
+      manifest.publishedAt ? `发布时间: ${manifest.publishedAt}` : '',
+      manifest.notes ? `\n更新说明:\n${manifest.notes}` : '',
+    ].filter(Boolean).join('\n')
+    if (!AUTO) {
+      const answer = dialog.showMessageBoxSync({
+        type: 'question',
+        title: '发现新版本',
+        message: `发现新版本 ${manifest.version}`,
+        detail,
+        buttons: ['现在升级', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      if (answer !== 0) return
+    } else {
+      log(`autotest: 跳过确认，直接升级到 ${manifest.version}`)
+    }
+    await createProgressWindow()
+    progressReady = true
+    reportProgress({ received: 0, total: manifest.size })
+    const tarball = await updater.fetchPackage(manifest, result.config, { log, onProgress: reportProgress })
+    const installed = updater.installPackage(tarball, { config: result.config, log, onProgress: reportProgress })
+    progressWindow?.close()
+    progressWindow = null
+    notify(`已升级到 ${installed?.version ?? manifest.version}`)
+    log(`upgrade done -> ${installed?.version ?? manifest.version}`)
+    await stopServer()
+    app.relaunch()
+    app.exit(0)
+  } catch (error) {
+    log(`upgrade failed: ${error.message}`)
+    if (progressReady) { progressWindow?.close(); progressWindow = null }
+    notify('升级失败', String(error.message ?? error), true)
+  } finally {
+    upgrading = false
+  }
 }
 
 function quitApplication() {
@@ -256,6 +365,11 @@ if (!gotLock) {
       log('autotest: openInBrowser then quit')
       openInBrowser()
       setTimeout(() => quitApplication(), 2000)
+    }
+    // 自动验收（仅测试用）：完整走一遍"检查更新 → 下载 → 校验 → 安装 → 重启"。
+    if (process.env.DSH_DESKTOP_AUTOTEST === 'update') {
+      log('autotest: checkForUpdates')
+      setTimeout(() => { void checkForUpdates() }, 5000)
     }
   })
 }

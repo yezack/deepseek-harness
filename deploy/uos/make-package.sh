@@ -64,6 +64,11 @@ echo "=== 2. 压缩 node ==="
 cd "$BUILD"
 zip -qr "$PKG/node.zip" node
 
+# 版本号：默认用 UTC 构建时刻（单调、可读）。需要固定值时用 DSH_BUILD_VERSION 覆盖。
+PKG_VERSION="${DSH_BUILD_VERSION:-$(date -u +%Y%m%d.%H%M)}"
+printf '%s\n' "$PKG_VERSION" > "$PKG/VERSION"
+echo "  版本: $PKG_VERSION"
+
 echo "=== 3. 压缩 app（约 1.4GB，稍慢）==="
 zip -qr "$PKG/app.zip" app
 
@@ -72,9 +77,27 @@ cd "$BUILD"
 rm -f dsh-uos-offline.tar.gz
 tar czf dsh-uos-offline.tar.gz -C "$BUILD" package
 
+# 升级清单：内网静态服务器上放 latest.json + 包本体。url 用相对名，
+# 客户端按 manifest 的 URL 解析（换服务器不用改包）。
+DSH_VER="$("$BUILD/node/bin/node" -p "require('$BUILD/app/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
+PKG_SHA="$(sha256sum "$BUILD/dsh-uos-offline.tar.gz" | cut -d' ' -f1)"
+PKG_SIZE="$(stat -c%s "$BUILD/dsh-uos-offline.tar.gz")"
+cat > "$BUILD/latest.json" <<JSON
+{
+  "version": "$PKG_VERSION",
+  "dshVersion": "$DSH_VER",
+  "sha256": "$PKG_SHA",
+  "size": $PKG_SIZE,
+  "url": "dsh-uos-offline.tar.gz",
+  "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "notes": ""
+}
+JSON
+
 echo "=== 5. 结果 ==="
 ls -lh "$PKG"
 ls -lh "$BUILD/dsh-uos-offline.tar.gz"
 sha256sum "$BUILD/dsh-uos-offline.tar.gz"
-tar tzf "$BUILD/dsh-uos-offline.tar.gz" | head -6
+cat "$BUILD/latest.json"
+tar tzf "$BUILD/dsh-uos-offline.tar.gz" | head -8
 echo "=== 完成 $(date) ==="
