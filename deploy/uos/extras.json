@@ -3,7 +3,7 @@
   { "name": "@lemoncat7/dsh-ssh", "version": "1.11.5" },
   { "name": "dshmarket", "version": "1.66.47" },
   { "name": "dsh-rewind-plugin", "version": "0.18.0" },
-  { "name": "dsh-dream-skin", "version": "10.21.2" },
+  { "name": "dsh-dream-skin", "version": "10.22.0" },
   { "name": "dsh-better-sidebar", "version": "0.28.0" },
   { "name": "dsh-better-workspace", "version": "0.35.1" },
   { "name": "@linxin666/dsh-client-ui-git-graph", "version": "0.4.8" },
@@ -11,7 +11,8 @@
   { "name": "dsh-session-manager", "version": "0.7.4" },
   { "name": "@yezack/dsh-univer-office", "spec": "file:extras/yezack-dsh-univer-office-0.3.8.tgz" },
   { "name": "@yezack/dsh-temp-workspace", "version": "0.2.4" },
-  { "name": "@yezack/dsh-remote-mobile", "spec": "file:extras/yezack-dsh-remote-mobile-1.9.2.tgz" },
+  { "name": "@yezack/dsh-remote-mobile", "spec": "file:extras/yezack-dsh-remote-mobile-1.10.0.tgz" },
+  { "name": "dsh-ga-controller", "spec": "file:extras/dsh-ga-controller-0.1.0.tgz" },
   {
     "name": "@yezack/chrome-devtools-mcp-108",
     "spec": "file:extras/yezack-chrome-devtools-mcp-108-1.10.4.tgz",

@@ -103,7 +103,7 @@
   写 profile 是**安装阶段**的职责：install.sh 以目标用户身份执行 seed-profile.sh。
 
 部署自检与日志
-  doctor.sh          逐项体检：glibc、原生模块 dlopen、12 个插件版本与清单是否
+  doctor.sh          逐项体检：glibc、原生模块 dlopen、13 个插件版本与清单是否
                      一致、系统/360 浏览器、DSH_CHROME_PATH、端口监听、DNAT
                      规则、profile 标记块与孤儿行、YAML 语法。
                      输出 [PASS]/[WARN]/[FAIL]，有 FAIL 时退出码 1。
@@ -153,7 +153,7 @@
   兼容层是幂等的，对现代浏览器只增加约 28KB 页面体积。
 
 预装插件与 chrome-devtools MCP
-  离线包已内置以下十二个插件，无需联网安装。这份清单与参考桌面 profile 的插件集
+  离线包已内置以下十三个插件，无需联网安装。这份清单与参考桌面 profile 的插件集
   一致（remote-mobile 用的是自维护 fork），版本取各包在镜像上的最新发布：
 
     dsh-capability-panel                    1.4.2     能力面板
@@ -168,6 +168,7 @@
     @yezack/dsh-temp-workspace              0.2.4     临时工作区（自维护 fork）
     @yezack/dsh-remote-mobile               1.10.0     远程与移动端接入（扫码配对，自维护 fork）
     dshmarket                               1.66.47   插件管理（启停 / 配置）
+      dsh-ga-controller                       0.1.0     企业私有化收敛（隐藏账号/登录/反馈与品牌头；默认启用，必须排在 bundles 最后）
 
   另外随包安装一个可选的语言增强包（不是 bundle，不单独启用，只补
   dsh-better-sidebar 的可选 peer）：

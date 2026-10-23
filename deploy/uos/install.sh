@@ -337,10 +337,37 @@ Exec=$DEST/desktop.sh
 Icon=$ELECTRON_DIR/app/tray.png
 Terminal=false
 Categories=Development;
+StartupNotify=true
 DESKTOP_ENTRY
     chown "$TARGET_USER":"$TARGET_GROUP" "$APPS_DIR/dsh-desktop.desktop" 2>/dev/null || true
     chmod 644 "$APPS_DIR/dsh-desktop.desktop"
-    echo "      桌面入口: $APPS_DIR/dsh-desktop.desktop"
+    echo "      应用菜单入口: $APPS_DIR/dsh-desktop.desktop"
+    # 桌面快捷方式。DDE 要求 .desktop 有可执行位，并用 gio 元数据标记 trusted，
+    # 否则双击会被当成文本（"不可信启动器"）。
+    DESKTOP_PATH=""
+    if command -v xdg-user-dir >/dev/null 2>&1; then
+      DESKTOP_PATH="$(sudo -u "$TARGET_USER" -H xdg-user-dir DESKTOP 2>/dev/null || true)"
+    fi
+    [ -z "$DESKTOP_PATH" ] && DESKTOP_PATH="$TARGET_HOME/Desktop"
+    if [ -d "$DESKTOP_PATH" ]; then
+      cp "$APPS_DIR/dsh-desktop.desktop" "$DESKTOP_PATH/dsh-desktop.desktop"
+      chown "$TARGET_USER":"$TARGET_GROUP" "$DESKTOP_PATH/dsh-desktop.desktop" 2>/dev/null || true
+      chmod 755 "$DESKTOP_PATH/dsh-desktop.desktop"
+      # 标记为"可信启动器"：DDE 的 gio 版本对 metadata::trusted 支持不一致，
+      # 两个工具都试一遍（gvfs-set-attribute 已废弃但仍可用，实测在本机才生效）。
+      if command -v gio >/dev/null 2>&1; then
+        sudo -u "$TARGET_USER" -H gio set "$DESKTOP_PATH/dsh-desktop.desktop" metadata::trusted true 2>/dev/null || true
+      fi
+      if command -v gvfs-set-attribute >/dev/null 2>&1; then
+        sudo -u "$TARGET_USER" -H gvfs-set-attribute "$DESKTOP_PATH/dsh-desktop.desktop" metadata::trusted true >/dev/null 2>&1 || true
+      fi
+      echo "      桌面快捷方式: $DESKTOP_PATH/dsh-desktop.desktop"
+    else
+      echo "      [提示] 未找到桌面目录（$DESKTOP_PATH），跳过桌面快捷方式"
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+      sudo -u "$TARGET_USER" -H update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
+    fi
   fi
   DESKTOP_OK=1
   echo "      桌面壳: $DEST/desktop.sh"
