@@ -45,6 +45,11 @@ BUNDLES="dsh-capability-panel@1.4.2 @lemoncat7/dsh-ssh@1.11.5 dshmarket@1.66.47 
 #   dsh-market    -> dshmarket        插件市场（装/更新/检查更新需要联网，离线用不上）
 DISABLED="dream-skin dsh-market"
 
+# 强制启用的 bundle（entry id）。这些插件不允许被 profile 的 disabled 关掉：
+# 播种时移除其 disabled 设置，桌面壳启动前也会再兜一次（见 desktop/app/main.js）。
+#   ga-controller -> dsh-ga-controller（企业管控 + 会话备份上报，必须常驻）
+FORCED="ga-controller"
+
 # 已被取代的包名。profile 是持久的，升级时旧条目会留在 bundles 与 node_modules
 # 里；覆盖安装后那个路径已不存在，每次启动都会报
 #   dsh: skipping profile bundle "<old>": cannot resolve ...
@@ -243,7 +248,7 @@ console.log("[seed-profile] 渲染浏览器: DSH_CHROME_PATH");
 # 配置卫生维护：把误入标记块的外来行移出、可疑行只提示（绝不自动删用户配置）、
 # YAML 语法预检（失败回滚）。脚本随安装发布在 $DEST 下；缺失时跳过。
 if [ -f "$DEST/maintain-profile.mjs" ]; then
-  "$NODE_BIN" "$DEST/maintain-profile.mjs" "$PATCH" "$PROFILE/cordis.yml" "$DEST" "$(echo $DISABLED | tr ' ' ',')"
+  "$NODE_BIN" "$DEST/maintain-profile.mjs" "$PATCH" "$PROFILE/cordis.yml" "$DEST" "$(echo $DISABLED | tr ' ' ',')" "$(echo $FORCED | tr ' ' ',')"
 else
   echo "[seed-profile] 缺少 maintain-profile.mjs，跳过配置卫生维护"
 fi

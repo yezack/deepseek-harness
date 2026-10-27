@@ -10,6 +10,7 @@
 const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, shell } = require('electron')
 const { spawn, execFileSync } = require('node:child_process')
 const fs = require('node:fs')
+const os = require('node:os')
 const http = require('node:http')
 const path = require('node:path')
 const updater = require('./updater')
@@ -438,6 +439,36 @@ async function startupGate() {
   return true
 }
 
+/**
+ * 强制启用的 bundle：启动 DSH 之前把它 profile 里的 disabled 设置清掉。
+ * 复用安装树里的 maintain-profile.mjs（单一实现），用 Electron 自带 node 运行。
+ * 这样即使有人手工写 disabled 行，下次从桌面壳启动也会被纠正。
+ */
+const FORCED_BUNDLES = ['ga-controller']
+
+function enforceForcedBundles() {
+  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+  const profile = path.join(home, 'profiles', 'web')
+  const patch = path.join(profile, 'cordis.patch.yml')
+  const cordis = path.join(profile, 'cordis.yml')
+  const maintainer = path.join(DEST, 'maintain-profile.mjs')
+  if (!fs.existsSync(patch) || !fs.existsSync(maintainer)) return
+  try {
+    const output = execFileSync(process.execPath, [
+      maintainer, patch, cordis, DEST, '', FORCED_BUNDLES.join(','),
+    ], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: 'pipe',
+      timeout: 30000,
+    })
+    for (const line of output.toString().split('\n')) {
+      if (line.includes('强制启用')) log(`forced: ${line.trim()}`)
+    }
+  } catch (error) {
+    log(`forced: maintain-profile 执行失败 ${error.message}`)
+  }
+}
+
 function startPeriodicCheck() {
   if (periodicTimer !== null) return
   periodicTimer = setInterval(() => { void checkForUpdates({ silent: true }) }, CHECK_INTERVAL_MS)
@@ -472,6 +503,7 @@ if (!gotLock) {
       log('startup: 强制更新模式（未启动 DSH 本体）')
       return
     }
+    enforceForcedBundles()
     createWindow()
     await loadUi()
     startPeriodicCheck()

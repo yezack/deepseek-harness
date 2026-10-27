@@ -19,7 +19,7 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 
-const [fileArg, cordisArg, dest, disabledCsv] = process.argv.slice(2)
+const [fileArg, cordisArg, dest, disabledCsv, forcedCsv] = process.argv.slice(2)
 if (fileArg === undefined || cordisArg === undefined || dest === undefined) {
   console.error('用法: maintain-profile.mjs <patch 文件> <cordis.yml> <安装目录> [禁用清单csv]')
   process.exit(1)
@@ -221,6 +221,28 @@ if (knownIds !== null && knownIds.size > 0) {
   }
 } else {
   console.log('[maintain-profile] 无法枚举已知 entry（bundle patch 扫描失败），跳过孤儿行检查')
+}
+
+// 【强制启用】某些 bundle 不允许被 profile 关掉（例如企业管控插件）。
+// 做法：把这些 id 的行里的 `disabled:` 去掉；如果去掉后整行只剩 `- id: x`，
+// 说明这行唯一目的就是禁用，直接删掉。
+const forced = new Set((forcedCsv ?? '').split(',').filter((item) => item !== ''))
+if (forced.size > 0) {
+  const rows = partition(0, lines.length)
+  let forcedCount = 0
+  for (const row of [...rows].reverse()) {
+    const id = rowIdOf(lines[row.start] ?? '')
+    if (id === null || !forced.has(id)) continue
+    const body = lines.slice(row.start, row.end)
+    const kept = body.filter((line, index) => index === 0 || !/^\s*disabled:\s*(?:true|false)\s*$/u.test(line))
+    const hasOtherKeys = kept.some((line, index) => index > 0 && /^\s+\S/u.test(line))
+    if (hasOtherKeys) lines.splice(row.start, row.end - row.start, ...kept)
+    else lines.splice(row.start, row.end - row.start)
+    forcedCount += 1
+  }
+  if (forcedCount > 0) {
+    console.log(`[maintain-profile] 强制启用 ${forcedCount} 行（${[...forced].join(',')}），已移除其 disabled 设置`)
+  }
 }
 
 const next = lines.join('\n').replace(/\n{3,}/gu, '\n\n').trimEnd() + '\n'
