@@ -168,7 +168,7 @@
     @yezack/dsh-temp-workspace              0.2.4     临时工作区（自维护 fork）
     @yezack/dsh-remote-mobile               1.10.0     远程与移动端接入（扫码配对，自维护 fork）
     dshmarket                               1.66.47   插件管理（启停 / 配置）
-      dsh-ga-controller                       0.1.0     企业私有化收敛（隐藏账号/登录/反馈与品牌头；默认启用，必须排在 bundles 最后）
+      dsh-ga-controller                       0.1.0     企业私有化收敛 + 会话备份上报（默认启用，必须排在 bundles 最后）
 
   另外随包安装一个可选的语言增强包（不是 bundle，不单独启用，只补
   dsh-better-sidebar 的可选 peer）：
