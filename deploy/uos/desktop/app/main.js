@@ -215,9 +215,18 @@ async function restartServer() {
   await loadUi()
 }
 
-/** 托盘与提示共用的版本摘要：本体 x · 插件 y（缺失的单元显示"未知"）。 */
-function versionsSummary(units = updater.installedUnits()) {
-  return `本体 ${units.body?.version ?? '未知'} · 插件 ${units.plugins?.version ?? '未知'}`
+/**
+ * 托盘上的版本摘要：本体 x · 插件 N 个。
+ * 插件数量取 installed.json 里 kind=plugin 的条目数；读不到 installed.json 时省略这一段
+ * （组件粒度分发下每个插件版本各不相同，用"个"比列一串版本更可读）。
+ */
+function versionsSummary() {
+  const body = updater.installedVersion()
+  const state = updater.installedState()
+  const bodyText = `本体 ${body?.version ?? '未知'}`
+  if (state === null) return bodyText
+  const plugins = Object.values(state.components).filter((entry) => entry?.kind === 'plugin').length
+  return `${bodyText} · 插件 ${plugins} 个`
 }
 
 function buildTray() {
@@ -237,16 +246,16 @@ function buildTray() {
   tray.on('click', () => openAgent())
 }
 
-// ===== 自动升级（内网静态清单 + 壳内驱动） =====
+// ===== 自动升级（静态清单 + installer 执行） =====
 // 规则：
-//   - 清单可以拆成 body / plugins 两个单元，各自独立升级（插件包小，不必重下整包）；
+//   - 分发是组件粒度：一个 installer + 本体组件 + 每个插件一个组件，没有整包；
+//   - 壳不自己下载/解包/回滚，只读清单做检查，再用 sudo 调 installer 执行升级；
 //   - 启动时检查一次；运行中每 1 小时静默检查；托盘可手动检查；
-//   - 强制更新由单元清单的 minVersion 判定：该单元本机版本 < minVersion 时**不启动
-//     DSH 本体**，直接显示强制更新窗口（窗口数据取触发强制更新的那个单元）；
-//   - 普通（建议）更新在对话框里问一句，并列出有变化的单元。
+//   - 强制更新由组件清单的 minVersion 判定：该组件本机版本 < minVersion 时**不启动
+//     DSH 本体**，直接显示强制更新窗口（窗口数据取触发强制更新的那个组件）；
+//   - 普通（建议）更新在对话框里问一句，并列出有变化的组件。
 const AUTO = process.env.DSH_DESKTOP_AUTOTEST === 'update'
 const CHECK_INTERVAL_MS = 60 * 60 * 1000
-const UNIT_LABELS = { body: '本体', plugins: '插件包' }
 let upgrading = false
 let progressWindow = null
 let forcedWindow = null
@@ -254,31 +263,33 @@ let forcedState = null
 let pendingUpdate = null
 let periodicTimer = null
 
-function unitLabel(key) {
-  return UNIT_LABELS[key] ?? key
+/** 组件的可读名字：本体 / 插件 <name>。 */
+function componentLabel(component) {
+  return component.kind === 'body' ? '本体' : `插件 ${component.name}`
 }
 
-/** 本次需要安装的单元（按清单顺序：先本体，再插件）。 */
-function pendingUnits(result) {
-  return (result.units ?? []).filter((unit) => unit.needsUpdate)
+/** 本次需要安装的组件（按清单 order：本体在前，插件按各自的 order）。 */
+function pendingComponents(result) {
+  return (result.components ?? []).filter((component) => component.needsUpdate)
 }
 
 /**
- * 强制更新窗口的数据视图：取"触发强制更新"的那个单元。
- * 没有单元命中时原样返回（旧清单的整包语义下整份检查结果就是数据源）。
+ * 强制更新窗口的数据：取"触发强制更新"的那个组件（本机版本低于它 minVersion 的第一个）。
+ * 其余字段沿用整份检查结果 —— 窗口里的"立即更新"要复用它来跑同一个升级流程。
+ * @param {object} result updater.check() 的结果
+ * @returns {object|null} 检查结果 + component；没有组件命中时返回 null
  */
 function forcedView(result) {
-  const unit = (result.units ?? []).find((entry) => entry.forced)
-  if (unit === undefined) return { ...result, unit: null }
+  const component = (result.components ?? []).find((entry) => entry.forced)
+  if (component === undefined) return null
   return {
     ...result,
-    unit,
-    installed: unit.installed,
+    component,
     manifest: {
       ...result.manifest,
-      ...unit.manifest,
-      dshVersion: unit.manifest.dshVersion ?? result.manifest.dshVersion ?? '',
-      notes: unit.manifest.notes ?? result.manifest.notes ?? '',
+      minVersion: component.minVersion,
+      version: component.version,
+      notes: result.manifest?.notes ?? '',
     },
   }
 }
@@ -299,19 +310,15 @@ function createProgressWindow() {
   return new Promise((resolve) => { progressWindow.webContents.once('did-finish-load', resolve) })
 }
 
-/** 进度窗文案：unit 为空时按"升级包"泛称（旧调用方式）。 */
-function reportProgress(progress, unit = null) {
+/**
+ * 进度窗：installer 只给 PHASE 短语、没有百分比，所以标题直接用短语
+ * （如「正在安装 dsh-better-sidebar」），进度条置满只表示"进行中"。
+ */
+function reportProgress(progress) {
   if (progressWindow === null) return
-  const name = unit === null ? '升级包' : unitLabel(unit.key)
-  const ratio = progress.total ? progress.received / progress.total : progress.phase === 'installing' ? 1 : 0
-  const label = progress.phase === 'installing'
-    ? '正在安装（请勿关闭）'
-    : `${(progress.received / 1048576).toFixed(1)} / ${((progress.total ?? 0) / 1048576).toFixed(1)} MB`
-  const title = progress.phase === 'installing'
-    ? (unit?.key === 'plugins' ? `正在安装 ${name}…` : `正在安装 ${name}（约 3–5 分钟）…`)
-    : `正在下载 ${name}…`
-  progressWindow?.webContents
-    .executeJavaScript(`window.setProgress(${ratio}, ${JSON.stringify(label)}); window.setPhase(${JSON.stringify(title)})`)
+  const phase = typeof progress?.phase === 'string' && progress.phase !== '' ? progress.phase : '正在升级…'
+  progressWindow.webContents
+    .executeJavaScript(`window.setProgress(1, ${JSON.stringify('请勿关闭应用')}); window.setPhase(${JSON.stringify(phase)})`)
     .catch(() => {})
 }
 
@@ -351,16 +358,17 @@ function showForcedWindow(state) {
   void forcedWindow.loadFile(path.join(__dirname, 'forced.html'))
 }
 
+// 强制更新窗口的数据：值全部取"触发强制更新的那个组件"，字段名保持不变。
 ipcMain.on('force-data', (event) => {
   const state = forcedState
   event.returnValue = state === null
     ? {}
     : {
-        installed: state.installed?.version ?? 'unknown',
-        minVersion: state.manifest.minVersion ?? '',
-        latest: state.manifest.version,
-        dshVersion: state.manifest.dshVersion ?? '',
-        notes: state.manifest.notes ?? '',
+        installed: state.component.installed ?? 'unknown',
+        minVersion: state.component.minVersion ?? '',
+        latest: state.component.version,
+        dshVersion: state.manifest?.dshVersion ?? '',
+        notes: state.manifest?.notes ?? '',
       }
 })
 ipcMain.on('force-upgrade', () => {
@@ -368,38 +376,29 @@ ipcMain.on('force-upgrade', () => {
 })
 ipcMain.on('force-quit', () => quitApplication())
 
-/** 执行升级：进度窗 → 按单元逐个 下载校验 → 安装 → 全部完成后重启壳。 */
+/** 执行升级：进度窗 → installer（下载/校验/安装/重播 profile 全在里面）→ 停服务 → 重启壳。 */
 async function upgradeAndRestart(result) {
   if (upgrading) return
   upgrading = true
   let progressReady = false
   try {
-    const config = result.config ?? updater.updateConfig()
-    const pending = pendingUnits(result)
+    const pending = pendingComponents(result)
     if (pending.length === 0) {
-      log('upgrade: 没有需要安装的单元')
+      log('upgrade: 没有需要安装的组件')
       return
     }
     await createProgressWindow()
     progressReady = true
-    for (const update of pending) {
-      const unit = update.manifest
-      log(`upgrade: 开始 ${unit.key} ${unit.version}`)
-      reportProgress({ received: 0, total: unit.size }, unit)
-      const tarball = await updater.fetchUnit(unit, config, {
-        log,
-        onProgress: (progress) => reportProgress(progress, unit),
-      })
-      updater.installUnit(unit, tarball, {
-        config,
-        log,
-        onProgress: (progress) => reportProgress(progress, unit),
-      })
-      log(`upgrade: ${unit.key} ${unit.version} 安装完成`)
-    }
+    // 第一个 PHASE 之前 installer 要先取清单/下组件，先给个标题避免停在静态文案上。
+    reportProgress({ phase: '正在准备升级（约 3–5 分钟）…' })
+    const outcome = await updater.installUpdates(result, {
+      log,
+      onProgress: (progress) => reportProgress(progress),
+    })
+    log(`upgrade: installer 完成\n${outcome.output}`)
     progressWindow?.close()
     progressWindow = null
-    notify(`已升级：${pending.map((unit) => `${unitLabel(unit.key)} ${unit.manifest.version}`).join('，')}`)
+    notify(`已升级：${pending.map((component) => `${componentLabel(component)} ${component.version}`).join('，')}`)
     log(`upgrade done -> ${versionsSummary()}`)
     await stopServer()
     app.relaunch()
@@ -431,15 +430,17 @@ async function checkForUpdates({ silent = false } = {}) {
   }
   if (result.forced) {
     const forced = forcedView(result)
-    log(`check: 命中强制更新（${unitLabel(forced.unit?.key ?? 'body')}），停止服务并显示强制更新窗口`)
-    await stopServer()
-    showForcedWindow(forced)
-    return
+    if (forced !== null) {
+      log(`check: 命中强制更新（${componentLabel(forced.component)}），停止服务并显示强制更新窗口`)
+      await stopServer()
+      showForcedWindow(forced)
+      return
+    }
   }
   pendingUpdate = result
-  const pending = pendingUnits(result)
+  const pending = pendingComponents(result)
   if (silent) {
-    log(`check: 发现新版本 ${pending.map((unit) => `${unitLabel(unit.key)} ${unit.manifest.version}`).join('，')}（静默，等用户从托盘升级）`)
+    log(`check: 发现新版本 ${pending.map((component) => `${componentLabel(component)} ${component.version}`).join('，')}（静默，等用户从托盘升级）`)
     return
   }
   if (AUTO) {
@@ -447,17 +448,16 @@ async function checkForUpdates({ silent = false } = {}) {
     await upgradeAndRestart(result)
     return
   }
-  const manifest = result.manifest
+  // 只有变了的组件才列出来；没变化的组件升级后会保持原样。
   const detail = [
-    ...pending.map((unit) => `${unitLabel(unit.key)} ${unit.installed?.version ?? '未知'} → ${unit.manifest.version}`),
-    manifest.dshVersion ? `dsh:      ${manifest.dshVersion}` : '',
-    manifest.publishedAt ? `发布时间: ${manifest.publishedAt}` : '',
-    manifest.notes ? `\n更新说明:\n${manifest.notes}` : '',
+    ...pending.map((component) => `${componentLabel(component)} ${component.installed ?? '未安装'} → ${component.version}`),
+    result.manifest?.dshVersion ? `dsh: ${result.manifest.dshVersion}` : '',
+    result.manifest?.notes ? `\n更新说明:\n${result.manifest.notes}` : '',
   ].filter(Boolean).join('\n')
   const answer = dialog.showMessageBoxSync({
     type: 'question',
     title: '发现新版本',
-    message: `发现新版本：${pending.map((unit) => `${unitLabel(unit.key)} ${unit.manifest.version}`).join('，')}`,
+    message: `发现新版本：${pending.length} 个组件`,
     detail,
     buttons: ['现在升级', '稍后'],
     defaultId: 0,
@@ -480,13 +480,15 @@ async function startupGate() {
   }
   if (result.status === 'available' && result.forced) {
     const forced = forcedView(result)
-    log(`startup: 强制更新 ${unitLabel(forced.unit?.key ?? 'body')} 本地 ${forced.installed?.version ?? 'unknown'} < 最低 ${forced.manifest.minVersion}`)
-    showForcedWindow(forced)
-    return false
+    if (forced !== null) {
+      log(`startup: 强制更新 ${componentLabel(forced.component)} 本地 ${forced.component.installed ?? 'unknown'} < 最低 ${forced.component.minVersion}`)
+      showForcedWindow(forced)
+      return false
+    }
   }
   if (result.status === 'available') {
     pendingUpdate = result
-    log(`startup: 发现新版本 ${pendingUnits(result).map((unit) => `${unitLabel(unit.key)} ${unit.manifest.version}`).join('，')}`)
+    log(`startup: 发现新版本 ${pendingComponents(result).map((component) => `${componentLabel(component)} ${component.version}`).join('，')}`)
   } else if (result.status === 'up-to-date') {
     log('startup: 已是最新')
   } else if (result.status === 'error') {

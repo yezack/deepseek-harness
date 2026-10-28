@@ -7,7 +7,6 @@
   { "name": "dsh-better-sidebar", "version": "0.28.0" },
   { "name": "dsh-better-workspace", "version": "0.35.1" },
   { "name": "@linxin666/dsh-client-ui-git-graph", "version": "0.4.8" },
-  { "name": "@huanlin/dsh-plugin-better-locale", "version": "0.4.3" },
   { "name": "dsh-session-manager", "version": "0.7.4" },
   { "name": "@yezack/dsh-univer-office", "spec": "file:extras/yezack-dsh-univer-office-0.3.8.tgz" },
   { "name": "@yezack/dsh-temp-workspace", "version": "0.2.4" },

@@ -1,0 +1,18 @@
+{
+  "components": {
+    "dsh-capability-panel": { "entryId": "capability-panel", "order": 10 },
+    "@lemoncat7/dsh-ssh": { "entryId": "dsh-ssh", "order": 20 },
+    "dshmarket": { "entryId": "dsh-market", "order": 30, "disabled": true },
+    "dsh-rewind-plugin": { "entryId": "rewind", "order": 40 },
+    "dsh-dream-skin": { "entryId": "dream-skin", "order": 50, "disabled": true },
+    "dsh-better-sidebar": { "entryId": "better-sidebar", "order": 60 },
+    "dsh-better-workspace": { "entryId": "better-workspace", "order": 70 },
+    "@linxin666/dsh-client-ui-git-graph": { "entryId": "ui-git-graph", "order": 80 },
+    "@huanlin/dsh-plugin-better-locale": { "entryId": "better-locale", "order": 90 },
+    "dsh-session-manager": { "entryId": "dsh-session-manager", "order": 100 },
+    "@yezack/dsh-univer-office": { "entryId": "univer", "order": 110 },
+    "@yezack/dsh-temp-workspace": { "entryId": "dsh-temp-workspace", "order": 120 },
+    "@yezack/dsh-remote-mobile": { "entryId": "remote-mobile", "order": 130 },
+    "dsh-ga-controller": { "entryId": "ga-controller", "order": 900, "alwaysLast": true }
+  }
+}

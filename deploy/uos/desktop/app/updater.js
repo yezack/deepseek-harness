@@ -1,39 +1,45 @@
 // 桌面壳的自动升级（客户端）。
 //
-// 约定：更新服务器就是一个**静态文件服务器**，放一份清单和若干升级包：
-//   latest.json                  { version, sha256, size, url, dshVersion, publishedAt, notes,
-//                                  units: { body: {...}, plugins: {...} } }
-//   dsh-uos-offline.tar.gz       整包（旧壳兼容；清单没有 units 时唯一可用的命名）
-//   dsh-uos-body-<ver>.tar.gz    本体包：app/ + node/ + 脚本
-//   dsh-uos-plugins-<ver>.tar.gz 插件包：plugins/ 依赖树
-// 客户端只做普通 HTTP GET，不登录、不带 token（服务端由运维另外实现/发布）。
+// 分发是「组件」粒度：一个 installer + 本体组件 + 每个插件一个组件，没有整包。
+//   manifest.json      format 2 组件清单：components[] 各自带 name/kind/version/order/sha256。
+//                      update.json 的 manifestUrl 指向它；installer 固定取 `<清单目录>/manifest.json`
+//   $DEST/installer.sh 安装器：下载、校验 sha256、按 order 调组件安装脚本、重播 profile
 //
-// 安装拆成两个可独立升级的单元，版本各写各的：
-//   body    -> DEST，版本写在 DEST/.installed-version（install.sh --upgrade）
-//   plugins -> DEST/plugins，版本写在 DEST/plugins/.installed-version（install-plugins.sh --upgrade）
-// 本体升级会整个搬走 DEST，所以插件目录要先暂存到 PRESERVE_DIR，成功和失败两条
-// 路径都必须搬回来 —— 那份副本是插件唯一的来源，丢了就只能重下整包。
-const crypto = require('node:crypto')
+// 壳只做两件事，下载/解包/备份/回滚全部由 installer 负责：
+//   check()          读清单 + 本机已装状态，算出每个组件「是否需要更新 / 是否强制更新」
+//   installUpdates() 用 sudo 调 `installer.sh upgrade all --server <清单目录>`，解析它的输出
+//
+// 本机已装状态有两个来源，优先级 installed.json > 组件自己的版本文件：
+//   $DEST/installed.json                           { format:1, layout:'components', components:{...} }
+//   $DEST/.installed-version                       本体
+//   $DEST/plugins/<name>/.installed-version        插件
+//
+// installer 的输出协议（壳只认这些前缀，其余行按普通日志记录）：
+//   PHASE <动作> <组件名|profile>      进度短语，如 `PHASE 安装 dsh-better-sidebar`
+//   RESULT ok|skipped <组件名> <版本>  / RESULT removed <组件名> / RESULT done
+//   RESULT ok profile seeded           profile 已重播
+//   ERROR <消息>
 const fs = require('node:fs')
 const http = require('node:http')
 const https = require('node:https')
 const path = require('node:path')
-const { execFileSync } = require('node:child_process')
+const { spawn, execFileSync } = require('node:child_process')
 
 const DEST = process.env.DSH_DEST || '/deepseek-harness'
-const STAGE_DIR = '/var/tmp/dsh-update'
-const PACKAGE_DIR = path.join(STAGE_DIR, 'package')
 const CONFIG_FILE = path.join(DEST, 'update.json')
-const PLUGINS_DIR = path.join(DEST, 'plugins')
+const STATE_FILE = path.join(DEST, 'installed.json')
+const INSTALLER = path.join(DEST, 'installer.sh')
 const BODY_STATE = path.join(DEST, '.installed-version')
-const PLUGINS_STATE = path.join(PLUGINS_DIR, '.installed-version')
-// 本体升级前把 DEST/plugins 暂存到这里（与 DEST 分开，避免被 mv DEST backup 一起搬走）。
-const PRESERVE_DIR = '/var/tmp/dsh-update-plugins-keep'
-// 单元顺序即安装顺序：先本体（install.sh 重建 app/node），再插件（依赖新 app 的 node）。
-const UNIT_KEYS = ['body', 'plugins']
-const UNIT_ENTRY = { body: 'install.sh', plugins: 'install-plugins.sh' }
-const UNIT_LABEL = { body: '本体', plugins: '插件包' }
+const PLUGINS_DIR = path.join(DEST, 'plugins')
+const BODY_NAME = '@deepseek-ai/dsh'
+const MANIFEST_FORMAT = 2
 const MAX_REDIRECTS = 5
+// installer 的输出可能很长，只留最近若干行给弹窗定位问题。
+const KEEP_LINES = 200
+const TAIL_LINES = 80
+const PHASE_PREFIX = 'PHASE '
+const RESULT_PREFIX = 'RESULT '
+const ERROR_PREFIX = 'ERROR '
 
 function readJson(file) {
   try {
@@ -43,8 +49,8 @@ function readJson(file) {
   }
 }
 
-// 默认升级服务器（未在 update.json / DSH_UPDATE_URL 里指定时使用）。
-// latest.json 里的 url 是相对名，会按这个地址解析。
+// 默认更新源（未在 update.json / DSH_UPDATE_URL 里指定时使用）。
+// 地址按普通清单 URL 使用；installer 只认 `<--server 目录>/manifest.json`，两者的换算见 serverBaseUrl()。
 const DEFAULT_MANIFEST_URL = 'http://autoupdate.kxzd.sjq.sh/deepseek_harness/latest.json'
 
 /** 更新配置：update.json 的 manifestUrl > 环境变量 DSH_UPDATE_URL > 内置默认服务器。 */
@@ -57,7 +63,7 @@ function updateConfig() {
 }
 
 /**
- * 读一个单元的版本状态文件（.installed-version）。
+ * 读一个版本状态文件（.installed-version）。
  * @param {string} file 状态文件绝对路径
  * @returns {object|null} 形如 { version, dshVersion, installedAt, mode }；缺失或损坏返回 null
  */
@@ -67,13 +73,42 @@ function readState(file) {
   return state
 }
 
-/** 两个单元的本地状态：{ body, plugins }，各自未安装时为 null。 */
-function installedUnits() {
-  return { body: readState(BODY_STATE), plugins: readState(PLUGINS_STATE) }
+/**
+ * installer 写的组件状态（installed.json）。它记着每个已装组件的 kind/version，
+ * 是托盘「插件 N 个」和按组件查版本的来源。
+ * @returns {{components:Object<string,object>}|null} 缺失、损坏或没有 components 对象时返回 null
+ */
+function installedState() {
+  const state = readJson(STATE_FILE)
+  if (state === null || typeof state !== 'object' || Array.isArray(state)) return null
+  const components = state.components
+  if (components === null || typeof components !== 'object' || Array.isArray(components)) return null
+  return state
 }
 
-/** 本体（旧调用方假设的"当前版本"）的本地状态。 */
+/**
+ * 一个组件的本机版本（installed.json 优先，其次是组件自己的 .installed-version）。
+ * @param {{name:string,kind:string}} component 清单里的组件
+ * @param {object|null} state 已读好的 installedState()，避免逐个组件重复读盘
+ * @returns {string|null} 未安装或读不到返回 null
+ */
+function installedVersionOf(component, state = installedState()) {
+  const entry = state?.components?.[component.name]
+  if (typeof entry?.version === 'string' && entry.version.trim() !== '') return entry.version.trim()
+  const file = component.kind === 'body'
+    ? BODY_STATE
+    : path.join(PLUGINS_DIR, component.name, '.installed-version')
+  const own = readState(file)
+  return typeof own?.version === 'string' && own.version.trim() !== '' ? own.version.trim() : null
+}
+
+/**
+ * 本体的本机版本状态（导出给壳显示当前版本）。
+ * @returns {object|null} 形如 { version, ... }；优先 installed.json 的本体条目，其次 DEST/.installed-version
+ */
 function installedVersion() {
+  const entry = installedState()?.components?.[BODY_NAME]
+  if (typeof entry?.version === 'string' && entry.version.trim() !== '') return entry
   return readState(BODY_STATE)
 }
 
@@ -91,58 +126,81 @@ function compareVersions(left, right) {
   return 0
 }
 
-/** 是否必须升级：manifest 给了 minVersion 且本机版本低于它（本机版本未知时也视为必须）。 */
-function isForced(manifest, installed) {
-  const minVersion = typeof manifest?.minVersion === 'string' ? manifest.minVersion.trim() : ''
+/**
+ * 是否必须升级：组件给了 minVersion 且本机版本低于它（本机版本未知时也视为必须）。
+ * @param {object} component 清单里的组件（只看 minVersion）
+ * @param {{version:string}|null} installed 本机版本状态；null 表示未知
+ * @returns {boolean}
+ */
+function isForced(component, installed) {
+  const minVersion = typeof component?.minVersion === 'string' ? component.minVersion.trim() : ''
   if (minVersion === '') return false
   if (installed === null) return true
   return compareVersions(installed.version, minVersion) < 0
 }
 
 /**
- * 把清单拆成单元列表。清单没有 units 时按旧语义降级为单个 body 单元：
- * 版本/哈希/大小/地址/最低版本全部取顶层字段（旧壳发布的就是这种整包清单）。
- * @param {object} manifest latest.json 解析结果
- * @returns {Array<{key:string,version:string,sha256:string,size:number,url:string,minVersion:string}>}
- * @throws {Error} 单元缺少 version/sha256/url，或既没有 units 也没有顶层 version+sha256
+ * 校验并展开清单里的组件列表（按 order 升序，order 相同保持清单顺序）。
+ * 只保留壳需要的字段；file/sha256/size 由 installer 自己用。
+ * @param {object} manifest manifest.json 解析结果
+ * @returns {Array<{name:string,kind:string,version:string,order:number,minVersion:string,entryId:string,disabled:boolean}>}
+ * @throws {Error} format 不是 2、components 不是非空数组、组件缺 name/kind/version
  */
-function unitManifests(manifest) {
-  const units = manifest?.units
-  const hasUnits = units !== null && typeof units === 'object' && !Array.isArray(units)
-  if (!hasUnits) {
-    const version = manifest?.version
-    const sha256 = manifest?.sha256
-    if (typeof version !== 'string' || version.trim() === '' || typeof sha256 !== 'string' || sha256.trim() === '') {
-      throw new Error('缺少 units，且顶层没有 version/sha256')
+function manifestComponents(manifest) {
+  if (manifest.format !== MANIFEST_FORMAT) {
+    throw new Error(`format 是 ${JSON.stringify(manifest.format)}，本壳只认 format ${MANIFEST_FORMAT} 组件清单`)
+  }
+  const list = manifest.components
+  if (!Array.isArray(list) || list.length === 0) throw new Error('缺少 components 数组')
+  const components = list.map((entry, index) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`components[${index}] 不是对象`)
     }
-    return [{
-      key: 'body',
-      version: version.trim(),
-      sha256: sha256.trim(),
-      size: typeof manifest.size === 'number' ? manifest.size : 0,
-      url: typeof manifest.url === 'string' && manifest.url.trim() !== '' ? manifest.url.trim() : 'dsh-uos-offline.tar.gz',
-      minVersion: typeof manifest.minVersion === 'string' ? manifest.minVersion.trim() : '',
-    }]
-  }
-  const list = []
-  for (const key of UNIT_KEYS) {
-    const entry = units[key]
-    if (entry === undefined || entry === null) continue
-    if (typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`units.${key} 不是对象`)
-    if (typeof entry.version !== 'string' || entry.version.trim() === '') throw new Error(`units.${key} 缺少 version`)
-    if (typeof entry.sha256 !== 'string' || entry.sha256.trim() === '') throw new Error(`units.${key} 缺少 sha256`)
-    if (typeof entry.url !== 'string' || entry.url.trim() === '') throw new Error(`units.${key} 缺少 url`)
-    list.push({
-      key,
-      version: entry.version.trim(),
-      sha256: entry.sha256.trim(),
-      size: typeof entry.size === 'number' ? entry.size : 0,
-      url: entry.url.trim(),
+    const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+    if (name === '') throw new Error(`components[${index}] 缺少 name`)
+    if (entry.kind !== 'body' && entry.kind !== 'plugin') throw new Error(`${name} 的 kind 不是 body/plugin`)
+    const version = typeof entry.version === 'string' ? entry.version.trim() : ''
+    if (version === '') throw new Error(`${name} 缺少 version`)
+    const order = entry.order === undefined || entry.order === null ? index : Number(entry.order)
+    return {
+      name,
+      kind: entry.kind,
+      version,
+      order: Number.isFinite(order) ? order : index,
       minVersion: typeof entry.minVersion === 'string' ? entry.minVersion.trim() : '',
-    })
-  }
-  if (list.length === 0) throw new Error('units 里没有可用的 body/plugins')
-  return list
+      entryId: typeof entry.entryId === 'string' ? entry.entryId : '',
+      disabled: entry.disabled === true,
+    }
+  })
+  return components.sort((left, right) => left.order - right.order)
+}
+
+/**
+ * check() 要拉取的清单地址。配置里以 / 结尾时按"分发目录"补上 manifest.json。
+ * @param {{manifestUrl:string}} config updateConfig() 的结果
+ * @returns {string}
+ * @throws {Error} 地址不是合法绝对 URL
+ */
+function manifestFileUrl(config) {
+  return config.manifestUrl.endsWith('/') ? new URL('manifest.json', config.manifestUrl).toString() : config.manifestUrl
+}
+
+/**
+ * installer 的 --server 参数。installer 自己拼 `<server>/manifest.json`（它只认这个文件名），
+ * 所以这里给的是清单所在目录：配置里带文件名时把文件名去掉。
+ * @param {{manifestUrl:string}} config updateConfig() 的结果
+ * @returns {string} 以 / 结尾的目录地址
+ * @throws {Error} 地址不是合法绝对 URL
+ */
+function serverBaseUrl(config) {
+  return new URL('.', manifestFileUrl(config)).toString()
+}
+
+/** 本机状态摘要（日志与"已是最新"提示）：本体 x · 插件 N 个。 */
+function describeLocal(views) {
+  const body = views.find((view) => view.kind === 'body')
+  const plugins = views.filter((view) => view.kind === 'plugin').length
+  return `本体 ${body?.installed ?? '未知'} · 插件 ${plugins} 个`
 }
 
 function requestModule(url) {
@@ -170,72 +228,36 @@ function request(url, { timeoutMs = 30000, redirects = MAX_REDIRECTS } = {}) {
   })
 }
 
-/** 下载到 STAGE_DIR，边下边算 sha256，并回报进度。 */
-function download(url, target, expectedSize, onProgress) {
-  return new Promise((resolve, reject) => {
-    const requestUrl = new URL(url)
-    const transport = requestModule(url)
-    fs.mkdirSync(path.dirname(target), { recursive: true })
-    const out = fs.createWriteStream(target)
-    const hash = crypto.createHash('sha256')
-    let received = 0
-    let lastReport = 0
-
-    const client = transport.get(requestUrl, { timeout: 60000 }, (response) => {
-      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-        response.resume()
-        resolve(download(new URL(response.headers.location, requestUrl).toString(), target, expectedSize, onProgress))
-        return
-      }
-      if (response.statusCode !== 200) {
-        response.resume()
-        reject(new Error(`下载失败 HTTP ${response.statusCode}`))
-        return
-      }
-      response.on('data', (chunk) => {
-        received += chunk.length
-        hash.update(chunk)
-        const now = Date.now()
-        if (now - lastReport > 200) {
-          lastReport = now
-          onProgress({ received, total: expectedSize })
-        }
-      })
-      response.pipe(out)
-      out.on('finish', () => {
-        out.close(() => {
-          onProgress({ received, total: expectedSize })
-          resolve({ sha256: hash.digest('hex'), size: received })
-        })
-      })
-      response.on('error', reject)
-    })
-    client.on('timeout', () => client.destroy(new Error('下载超时')))
-    client.on('error', (error) => { out.destroy(); reject(error) })
-  })
+/**
+ * installer 的 PHASE 行变成进度窗标题短语。
+ * @param {string} body PHASE 之后的部分，如 `安装 dsh-better-sidebar` / `重播 profile`
+ * @returns {string} 形如「正在安装 dsh-better-sidebar」
+ */
+function phaseTitle(body) {
+  const [action, ...rest] = body.split(/\s+/u)
+  if (action === undefined || action === '') return '正在升级…'
+  const target = rest.join(' ').trim()
+  return target === '' ? `正在${action}…` : `正在${action} ${target}`
 }
 
 /**
- * 解包一个单元到 STAGE_DIR（先清空 package/），并校验它的安装入口脚本存在。
- * @param {string} key 'body' | 'plugins'
- * @param {string} tarball 下载好的 tar.gz
+ * installer 的 RESULT 行变成一句中文（壳只写日志，不复用它的语义做判断）。
+ * @param {string} body RESULT 之后的部分，如 `ok dsh-better-sidebar 0.28.0` / `done` / `ok profile seeded`
+ * @returns {string}
  */
-function extractUnit(key, tarball) {
-  const entry = UNIT_ENTRY[key]
-  if (entry === undefined) throw new Error(`未知的升级单元：${key}`)
-  fs.mkdirSync(STAGE_DIR, { recursive: true })
-  fs.rmSync(PACKAGE_DIR, { recursive: true, force: true })
-  execFileSync('tar', ['xzf', tarball, '-C', STAGE_DIR], { stdio: 'pipe' })
-  if (!fs.existsSync(path.join(PACKAGE_DIR, entry))) {
-    throw new Error(`升级包结构异常：缺少 ${entry}`)
-  }
+function describeResult(body) {
+  const [status, ...rest] = body.split(/\s+/u)
+  if (status === 'done') return '本轮安装结束'
+  if (status === 'ok' && rest[0] === 'profile' && rest[1] === 'seeded') return 'profile 已重播'
+  if (status === 'ok' && rest.length >= 2) return `已安装 ${rest[0]} ${rest[1]}`
+  if (status === 'ok') return `已完成${rest.length > 0 ? ` ${rest.join(' ')}` : ''}`
+  if (status === 'skipped' && rest.length >= 2) return `跳过 ${rest[0]}（已是 ${rest[1]}）`
+  if (status === 'skipped') return `已完成${rest.length > 0 ? ` ${rest.join(' ')}` : ''}`
+  if (status === 'removed') return `已卸载 ${rest.join(' ')}`.trim()
+  return body
 }
 
-/** 旧名字：解整包（结构等同 body 包，必须含 install.sh）。 */
-function extractPackage(tarball) {
-  extractUnit('body', tarball)
-}
-
+/** 免密 sudo 是否可用：installer 需要 root，壳不能弹密码框。 */
 function hasPasswordlessSudo() {
   try {
     execFileSync('sudo', ['-n', 'true'], { stdio: 'ignore' })
@@ -243,11 +265,6 @@ function hasPasswordlessSudo() {
   } catch (error) {
     return false
   }
-}
-
-/** 以 root 跑一条命令（免密 sudo）。失败会抛错，由调用方决定是否回滚。 */
-function runSudo(args, options = {}) {
-  return execFileSync('sudo', ['-n', ...args], { stdio: 'pipe', ...options })
 }
 
 /** 路径是否存在。DEST 归 root 时普通用户 stat 可能被拒，回落到 sudo test。 */
@@ -261,243 +278,168 @@ function pathExists(target) {
   }
 }
 
-/** 检查更新。返回 { status: no-config | up-to-date | available | error, ... }。 */
+/**
+ * 检查更新。
+ * @param {{log?:Function}} hooks log 收到普通日志行
+ * @returns {Promise<object>} 四种结果之一：
+ *   {status:'no-config', message}
+ *   {status:'error', message}                          拉清单失败/格式错，message 带 URL
+ *   {status:'up-to-date', message, manifest, components, forced}
+ *   {status:'available', manifest, components, forced}
+ *   components 的每一项是 {name,kind,version,installed,needsUpdate,forced}
+ */
 async function check({ log } = {}) {
   const config = updateConfig()
-  if (config === null) {
-    return { status: 'no-config', message: '未配置更新源（安装时用 DSH_UPDATE_URL，或写 /deepseek-harness/update.json）' }
+  if (config.manifestUrl === '') {
+    return { status: 'no-config', message: `未配置更新源（写 ${CONFIG_FILE} 的 manifestUrl，或设环境变量 DSH_UPDATE_URL）` }
+  }
+  let manifestUrl
+  try {
+    manifestUrl = manifestFileUrl(config)
+  } catch (error) {
+    return { status: 'error', message: `更新源地址无效（${config.manifestUrl}）：${error.message}` }
   }
   let manifest
   try {
-    const response = await request(config.manifestUrl)
+    const response = await request(manifestUrl)
     if (response.statusCode !== 200) throw new Error(`HTTP ${response.statusCode}`)
     manifest = JSON.parse(response.body.toString('utf8'))
   } catch (error) {
     log?.(`check: 拉取清单失败 ${error.message}`)
-    return { status: 'error', message: `无法获取更新清单（${config.manifestUrl}）：${error.message}` }
+    return { status: 'error', message: `无法获取更新清单（${manifestUrl}）：${error.message}` }
   }
-  if (manifest === null || typeof manifest !== 'object') {
-    return { status: 'error', message: '更新清单格式不正确（不是 JSON 对象）' }
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    return { status: 'error', message: `更新清单格式不正确（不是 JSON 对象）：${manifestUrl}` }
   }
-  let units
+  let components
   try {
-    units = unitManifests(manifest)
+    components = manifestComponents(manifest)
   } catch (error) {
-    return { status: 'error', message: `更新清单格式不正确（${error.message}）` }
+    return { status: 'error', message: `更新清单格式不正确（${error.message}）：${manifestUrl}` }
   }
-  const installed = installedUnits()
-  const views = units.map((unit) => {
-    const local = installed[unit.key] ?? null
+  const state = installedState()
+  const views = components.map((component) => {
+    const installed = installedVersionOf(component, state)
     return {
-      key: unit.key,
-      manifest: unit,
-      installed: local,
-      // 与旧行为一致：版本字符串不同就要更新（本机未知也算）。
-      needsUpdate: local === null || local.version !== unit.version,
-      forced: isForced(unit, local),
+      name: component.name,
+      kind: component.kind,
+      version: component.version,
+      installed,
+      // 与旧行为一致：版本字符串不同就要更新（本机没装也算）。
+      needsUpdate: installed === null || installed !== component.version,
+      // 强制更新只看 minVersion 与本机版本；本机版本未知时 isForced 视为必须。
+      forced: isForced(component, installed === null ? null : { version: installed }),
     }
   })
   const pending = views.filter((view) => view.needsUpdate)
   const forced = views.some((view) => view.forced)
-  const describe = (stateOf) => views
-    .map((view) => `${UNIT_LABEL[view.key] ?? view.key} ${stateOf(view) ?? '未知'}`)
-    .join(' · ')
-  log?.(`check: 远端 ${describe((view) => view.manifest.version)}；本地 ${describe((view) => view.installed?.version)}`)
+  log?.(`check: 远端 ${manifest.version ?? '未知'}（dsh ${manifest.dshVersion ?? '未知'}），本地 ${describeLocal(views)}，${pending.length} 个组件待更新${forced ? '（含强制更新）' : ''}`)
   if (pending.length === 0) {
     return {
       status: 'up-to-date',
-      message: `已是最新版本（${describe((view) => view.installed?.version)}）`,
-      config,
+      message: `已是最新版本（${describeLocal(views)}）`,
       manifest,
-      installed: installed.body ?? null,
-      units: views,
+      components: views,
       forced,
     }
   }
-  return {
-    status: 'available',
-    config,
-    manifest,
-    installed: installed.body ?? null,
-    units: views,
-    forced,
-  }
+  return { status: 'available', manifest, components: views, forced }
 }
 
 /**
- * 下载并校验一个单元的升级包（复用 request/download）。
- * @param {object} unit unitManifests() 的元素（check() 结果里是 units[].manifest）
- * @param {{manifestUrl:string}} config updateConfig() 的结果，用来解析相对 url
- * @param {{log?:Function,onProgress?:Function}} hooks onProgress 收到 { received, total }
- * @returns {Promise<string>} STAGE_DIR 里的 tarball 路径
+ * 调 installer 升级所有需要更新的组件。
+ * installer 负责下载/校验/按 order 安装/重播 profile；壳只解析它打印的 PHASE/RESULT/ERROR 行。
+ * @param {object} result check() 的结果（这里只用来写日志）
+ * @param {{log?:Function,onProgress?:Function}} hooks
+ *   onProgress 收到 {phase}，phase 可以直接当进度窗标题（如「正在安装 dsh-better-sidebar」）
+ * @returns {Promise<{ok:boolean,output:string}>} output 是最近 80 行日志
+ * @throws {Error} 无免密 sudo、找不到 installer、installer 退出码非 0（消息带最近 80 行日志）
  */
-async function fetchUnit(unit, config, { log, onProgress } = {}) {
-  if (typeof config?.manifestUrl !== 'string' || config.manifestUrl === '') {
-    throw new Error('缺少更新源地址（config.manifestUrl），无法解析下载地址')
-  }
-  const report = typeof onProgress === 'function' ? onProgress : () => {}
-  fs.mkdirSync(STAGE_DIR, { recursive: true })
-  const target = path.join(STAGE_DIR, `dsh-uos-${unit.key}.tar.gz`)
-  const downloadUrl = new URL(unit.url, config.manifestUrl).toString()
-  log?.(`fetch: ${UNIT_LABEL[unit.key] ?? unit.key} ${unit.version} ${downloadUrl}`)
-  const result = await download(downloadUrl, target, unit.size, report)
-  // size=0 是清单模板里的占位值，不当作"期望 0 字节"。
-  if (typeof unit.size === 'number' && unit.size > 0 && unit.size !== result.size) {
-    throw new Error(`包大小不符：期望 ${unit.size}，实际 ${result.size}`)
-  }
-  if (result.sha256 !== unit.sha256) {
-    throw new Error(`sha256 校验失败：期望 ${unit.sha256.slice(0, 12)}…，实际 ${result.sha256.slice(0, 12)}…`)
-  }
-  log?.(`fetch: ${UNIT_LABEL[unit.key] ?? unit.key}校验通过 ${result.size} 字节`)
-  return target
-}
-
-/**
- * 本体安装：暂存插件 → 备份 DEST → install.sh --upgrade → 补写 update.json →
- * 搬回插件 → 删除备份。任何一步失败都回滚到升级前的 DEST，并把插件搬回。
- * 注意：搬回插件之后不再有任何会抛错的操作 —— 否则回滚会连同刚搬回的插件一起删掉。
- * @param {string} tarball fetchUnit() 的返回值
- * @param {{config:{manifestUrl:string},log?:Function,onProgress?:Function}} options
- * @returns {object|null} 安装后的 DEST/.installed-version
- */
-function installBodyUnit(tarball, { config, log, onProgress } = {}) {
-  if (typeof config?.manifestUrl !== 'string' || config.manifestUrl === '') {
-    throw new Error('缺少更新源地址（config.manifestUrl），无法在升级后保留 update.json')
-  }
-  if (!pathExists(DEST)) {
-    throw new Error(`安装目录不存在：${DEST}（无法升级，请先完整安装）`)
-  }
-  extractPackage(tarball)
-  onProgress?.({ phase: 'installing' })
-  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
-  const backup = `${DEST}.bak-${stamp}`
-  let backedUp = false
-  let preserved = false
+async function installUpdates(result, { log, onProgress } = {}) {
+  const config = updateConfig()
+  let server
   try {
-    // 1) 插件目录先挪出 DEST：下一步整个搬走 DEST，而 install.sh 不认领 plugins。
-    if (pathExists(PLUGINS_DIR)) {
-      runSudo(['rm', '-rf', PRESERVE_DIR])
-      runSudo(['mv', PLUGINS_DIR, PRESERVE_DIR])
-      preserved = true
-      log?.(`install: 插件目录已暂存 ${PLUGINS_DIR} -> ${PRESERVE_DIR}`)
-    }
-    // 2) 备份当前安装（与人工升级流程一致；install.sh 的备份保留策略会清理过旧的 .bak）。
-    log?.(`install: 备份 ${DEST} -> ${backup}`)
-    runSudo(['mv', DEST, backup])
-    backedUp = true
-    // 3) 跑安装器。sudo 默认会重置环境，DSH_UPDATE_URL 必须显式经 `env` 传进去，
-    //    否则 install.sh 收不到、升级后 update.json 变成空配置（实测踩过）。
-    const output = runSudo([
-      'env',
-      `DSH_UPDATE_URL=${config.manifestUrl}`,
-      'bash', path.join(PACKAGE_DIR, 'install.sh'), '--upgrade',
-    ], { timeout: 20 * 60 * 1000 })
-    log?.(`install: 完成\n${output.toString().slice(-4000)}`)
-    // 4) 兜底补写更新源：即使 install.sh 没写（例如老版本安装器），也把配置补回去。
-    //    放在搬回插件之前，失败时插件仍在 PRESERVE_DIR，回滚是安全的。
-    runSudo(['tee', path.join(DEST, 'update.json')], {
-      input: `${JSON.stringify({ manifestUrl: config.manifestUrl }, null, 2)}\n`,
-    })
-    // 5) 插件目录搬回。install.sh 不碰 plugins，正常情况下 DEST/plugins 不存在。
-    if (preserved) {
-      runSudo(['mv', PRESERVE_DIR, PLUGINS_DIR])
-      preserved = false
-      log?.('install: 插件目录已恢复')
-    }
-    // 6) 删除备份：此刻新安装与插件都已就位，失败只记日志（不能因此回滚）。
-    try {
-      runSudo(['rm', '-rf', backup])
-    } catch (error) {
-      log?.(`install: 删除备份失败（不影响本次升级）: ${error.message}`)
-    }
+    server = serverBaseUrl(config)
   } catch (error) {
-    const detail = (error.stdout?.toString() ?? '') + (error.stderr?.toString() ?? '')
-    log?.(`install: 失败，回滚\n${detail.slice(-4000)}`)
-    try {
-      if (backedUp) {
-        runSudo(['rm', '-rf', DEST])
-        runSudo(['mv', backup, DEST])
-      }
-      if (preserved) {
-        // 插件是唯一不在这两份副本里的数据（backup 里没有 plugins），必须搬回。
-        if (pathExists(PLUGINS_DIR)) runSudo(['rm', '-rf', PLUGINS_DIR])
-        runSudo(['mv', PRESERVE_DIR, PLUGINS_DIR])
-        preserved = false
-      }
-      log?.('install: 已回滚到升级前')
-    } catch (rollbackError) {
-      log?.(`install: 回滚失败 ${rollbackError.message}`)
-      if (preserved) log?.(`install: 插件目录仍保留在 ${PRESERVE_DIR}，请手工搬回 ${PLUGINS_DIR}`)
-    }
-    throw new Error(`本体升级失败（已尝试回滚）：${error.message}`)
+    throw new Error(`更新源地址无效（${config.manifestUrl}）：${error.message}`)
   }
-  fs.rmSync(STAGE_DIR, { recursive: true, force: true })
-  return readState(BODY_STATE)
-}
-
-/**
- * 插件安装：install-plugins.sh 自己解 plugins.zip 并原子换目录，失败不改动现有
- * DEST/plugins，所以这里不做备份/回滚，只把失败抛给调用方。
- * @param {string} tarball fetchUnit() 的返回值
- * @param {{log?:Function,onProgress?:Function}} options
- * @returns {object|null} 安装后的 DEST/plugins/.installed-version
- */
-function installPluginsUnit(tarball, { log, onProgress } = {}) {
-  extractUnit('plugins', tarball)
-  onProgress?.({ phase: 'installing' })
-  const output = runSudo([
-    'env', `DSH_DEST=${DEST}`,
-    'bash', path.join(PACKAGE_DIR, 'install-plugins.sh'), '--upgrade',
-  ], { timeout: 20 * 60 * 1000 })
-  log?.(`install: 插件安装完成\n${output.toString().slice(-4000)}`)
-  fs.rmSync(STAGE_DIR, { recursive: true, force: true })
-  return readState(PLUGINS_STATE)
-}
-
-/**
- * 安装一个单元。
- * @param {object} unit unitManifests() 的元素
- * @param {string} tarball fetchUnit() 的返回值
- * @param {{config?:object,log?:Function,onProgress?:Function}} options body 需要 config.manifestUrl
- * @returns {object|null} 该单元安装后的状态（对应 .installed-version）
- */
-function installUnit(unit, tarball, options = {}) {
   if (!hasPasswordlessSudo()) {
-    throw new Error('升级需要免密 sudo（sudo -n）。请让运维给该账户配置 sudoers，或手工升级。')
+    throw new Error('升级需要免密 sudo（sudo -n）。请让运维给该账户配置 sudoers，或改用离线包手工升级。')
   }
-  if (unit?.key === 'body') return installBodyUnit(tarball, options)
-  if (unit?.key === 'plugins') return installPluginsUnit(tarball, options)
-  throw new Error(`未知的升级单元：${unit?.key}`)
-}
+  if (!pathExists(INSTALLER)) {
+    throw new Error(`找不到组件安装器：${INSTALLER}（请先用离线包完整安装一次）`)
+  }
+  // sudo 默认重置环境，DSH_DEST 必须写在 sudo 之后（env），否则自定义安装目录会被
+  // installer 当成默认的 /deepseek-harness，两边读写的 installed.json 不是同一份。
+  const args = ['-n', 'env', `DSH_DEST=${DEST}`, 'bash', INSTALLER, 'upgrade', 'all', '--server', server]
+  log?.(`install: sudo ${args.join(' ')}（目标清单版本 ${result?.manifest?.version ?? '未知'}）`)
+  return new Promise((resolve, reject) => {
+    const child = spawn('sudo', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const recent = []
+    const errors = []
+    let buffer = ''
+    let settled = false
 
-/** 旧的整包下载入口（兼容别名）：清单没有 units 时降级为 body 单元。 */
-async function fetchPackage(manifest, config, { log, onProgress } = {}) {
-  const [unit] = unitManifests(manifest)
-  return fetchUnit(unit, config, { log, onProgress })
-}
-
-/** 旧的整包安装入口（兼容别名）：等价于对 body 单元调用 installUnit。 */
-function installPackage(tarball, options = {}) {
-  return installUnit({ key: 'body' }, tarball, options)
+    const tail = (count) => recent.slice(-count).join('\n')
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      if (error === null) resolve(value)
+      else reject(error)
+    }
+    const handleLine = (raw) => {
+      const line = raw.replace(/\r$/u, '')
+      if (line === '') return
+      recent.push(line)
+      if (recent.length > KEEP_LINES) recent.shift()
+      if (line.startsWith(PHASE_PREFIX)) {
+        onProgress?.({ phase: phaseTitle(line.slice(PHASE_PREFIX.length).trim()) })
+        return
+      }
+      if (line.startsWith(ERROR_PREFIX)) {
+        errors.push(line.slice(ERROR_PREFIX.length).trim())
+        log?.(`installer: ${line}`)
+        return
+      }
+      if (line.startsWith(RESULT_PREFIX)) {
+        log?.(`installer: ${describeResult(line.slice(RESULT_PREFIX.length).trim())}`)
+        return
+      }
+      log?.(`installer: ${line}`)
+    }
+    // 子进程的 chunk 可能把一行切成几段，按换行攒够一行再解析。
+    const consume = (chunk) => {
+      buffer += chunk.toString()
+      let index = buffer.indexOf('\n')
+      while (index !== -1) {
+        handleLine(buffer.slice(0, index))
+        buffer = buffer.slice(index + 1)
+        index = buffer.indexOf('\n')
+      }
+    }
+    child.stdout?.on('data', consume)
+    child.stderr?.on('data', consume)
+    child.on('error', (error) => finish(new Error(`无法执行 sudo：${error.message}`), null))
+    child.on('close', (code, signal) => {
+      if (buffer !== '') handleLine(buffer)
+      buffer = ''
+      if (code === 0) {
+        finish(null, { ok: true, output: tail(TAIL_LINES) })
+        return
+      }
+      const reason = errors.length > 0 ? `：${errors.join('；')}` : ''
+      finish(new Error(`升级失败（退出码 ${code ?? signal}）${reason}\n${tail(TAIL_LINES)}`), null)
+    })
+  })
 }
 
 module.exports = {
   check,
-  fetchPackage,
-  installPackage,
+  installUpdates,
   updateConfig,
   installedVersion,
+  installedState,
   compareVersions,
   isForced,
-  STAGE_DIR,
   DEST,
-  PLUGINS_DIR,
-  BODY_STATE,
-  PLUGINS_STATE,
-  PRESERVE_DIR,
-  readState,
-  installedUnits,
-  unitManifests,
-  fetchUnit,
-  installUnit,
 }
