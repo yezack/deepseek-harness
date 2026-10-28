@@ -24,6 +24,10 @@ if [ -z "$HOME_DIR" ]; then echo "seed-profile: 需要 DSH_HOME" >&2; exit 1; fi
 NODE_BIN="${SEED_NODE:-node}"
 PROFILE="$HOME_DIR/profiles/web"
 MODULES="$PROFILE/node_modules"
+# 插件是独立单元：优先从 $DEST/plugins/app 取包，旧布局（插件混在本体树里）
+# 回落到 $DEST/app。链接目标变了要重指，否则升级插件后 profile 仍指向被替换的旧路径。
+PLUGINS_ROOT="$DEST/plugins/app/node_modules"
+[ -d "$PLUGINS_ROOT" ] || PLUGINS_ROOT="$DEST/app/node_modules"
 
 # 写 profile 前留一份带时间戳的备份（保留最近 3 份）。seed-profile 现在是
 # **安装/升级阶段**唯一的写入口；即便如此，用户配置仍然要先备份再动。
@@ -60,16 +64,23 @@ RETIRED="dsh-remote-mobile @michengai/dsh-archive-manager dsh-univer-office"
 
 for entry in $BUNDLES; do
   name="${entry%@*}"
-  source_dir="$DEST/app/node_modules/$name"
+  source_dir="$PLUGINS_ROOT/$name"
   [ -d "$source_dir" ] || continue
   link="$MODULES/$name"
   mkdir -p "$(dirname "$link")"
-  if [ -e "$link" ]; then
+  if [ -L "$link" ]; then
+    # 已存在的软链：目标不一致就重指（插件从 $DEST/app 迁到 $DEST/plugins，
+    # 或某个插件包在升级后换了目录时，旧链会指向已删除的路径）。
+    current="$(readlink "$link" 2>/dev/null || true)"
+    if [ "$current" != "$source_dir" ]; then
+      rm -f "$link"
+      ln -s "$source_dir" "$link"
+    fi
     continue
   fi
-  # 悬空软链（目标已被新安装移除）要替换掉，-e 对它是 false，所以单独判断。
-  if [ -L "$link" ]; then
-    rm -f "$link"
+  if [ -e "$link" ]; then
+    # 实目录：用户自己 pnpm 装的包，保留原样，不接管。
+    continue
   fi
   ln -s "$source_dir" "$link"
 done
@@ -256,16 +267,19 @@ fi
 # 播种标记：记录"哪个 dsh 版本播过种、谁播的、何时"。启动时的 preflight.sh 用它
 # 判断 profile 是否与当前安装同步（只读，不触发任何写入）。
 DSH_VER="$(LC_ALL=C "$NODE_BIN" -p "require('$DEST/app/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
+# 插件单元版本：与本体分开记录，插件单独升级后 preflight 才能发现 profile 没跟上。
+PLUGINS_VER="$(LC_ALL=C "$NODE_BIN" -p "JSON.parse(require('node:fs').readFileSync('$DEST/plugins/.installed-version','utf8')).version" 2>/dev/null || echo "")"
 "$NODE_BIN" -e '
 const fs = require("node:fs")
 const path = require("node:path")
-const [profileDir, dshVersion] = process.argv.slice(1)
+const [profileDir, dshVersion, pluginsVersion] = process.argv.slice(1)
 const file = path.join(profileDir, ".dsh-offline-state.json")
 fs.writeFileSync(file, JSON.stringify({
   seedVersion: 2,
   dshVersion,
+  ...(pluginsVersion ? { pluginsVersion } : {}),
   seededAt: new Date().toISOString(),
   seededBy: process.env.USER || process.env.LOGNAME || "unknown",
 }, null, 2) + "\n")
-' "$PROFILE" "$DSH_VER"
-echo "[seed-profile] 播种标记: dsh $DSH_VER"
+' "$PROFILE" "$DSH_VER" "$PLUGINS_VER"
+echo "[seed-profile] 播种标记: dsh $DSH_VER${PLUGINS_VER:+ / 插件 $PLUGINS_VER}"

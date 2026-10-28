@@ -215,11 +215,15 @@ async function restartServer() {
   await loadUi()
 }
 
+/** 托盘与提示共用的版本摘要：本体 x · 插件 y（缺失的单元显示"未知"）。 */
+function versionsSummary(units = updater.installedUnits()) {
+  return `本体 ${units.body?.version ?? '未知'} · 插件 ${units.plugins?.version ?? '未知'}`
+}
+
 function buildTray() {
   const image = nativeImage.createFromPath(path.join(__dirname, 'tray.png'))
   tray = new Tray(image)
   tray.setToolTip('DeepSeek Harness')
-  const installed = updater.installedVersion()
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开 Agent', click: () => openAgent() },
     { label: '在浏览器打开', click: () => openInBrowser() },
@@ -227,7 +231,7 @@ function buildTray() {
     { label: '检查更新', click: () => { void checkForUpdates() } },
     { label: '重启服务', click: () => { void restartServer() } },
     { type: 'separator' },
-    { label: `当前版本: ${installed?.version ?? '未知'}`, enabled: false },
+    { label: `当前版本: ${versionsSummary()}`, enabled: false },
     { label: '退出', click: () => quitApplication() },
   ]))
   tray.on('click', () => openAgent())
@@ -235,18 +239,49 @@ function buildTray() {
 
 // ===== 自动升级（内网静态清单 + 壳内驱动） =====
 // 规则：
+//   - 清单可以拆成 body / plugins 两个单元，各自独立升级（插件包小，不必重下整包）；
 //   - 启动时检查一次；运行中每 1 小时静默检查；托盘可手动检查；
-//   - 强制更新由清单的 minVersion 判定：本机版本 < minVersion 时**不启动 DSH 本体**，
-//     直接显示强制更新窗口；
-//   - 普通（建议）更新在对话框里问一句。
+//   - 强制更新由单元清单的 minVersion 判定：该单元本机版本 < minVersion 时**不启动
+//     DSH 本体**，直接显示强制更新窗口（窗口数据取触发强制更新的那个单元）；
+//   - 普通（建议）更新在对话框里问一句，并列出有变化的单元。
 const AUTO = process.env.DSH_DESKTOP_AUTOTEST === 'update'
 const CHECK_INTERVAL_MS = 60 * 60 * 1000
+const UNIT_LABELS = { body: '本体', plugins: '插件包' }
 let upgrading = false
 let progressWindow = null
 let forcedWindow = null
 let forcedState = null
 let pendingUpdate = null
 let periodicTimer = null
+
+function unitLabel(key) {
+  return UNIT_LABELS[key] ?? key
+}
+
+/** 本次需要安装的单元（按清单顺序：先本体，再插件）。 */
+function pendingUnits(result) {
+  return (result.units ?? []).filter((unit) => unit.needsUpdate)
+}
+
+/**
+ * 强制更新窗口的数据视图：取"触发强制更新"的那个单元。
+ * 没有单元命中时原样返回（旧清单的整包语义下整份检查结果就是数据源）。
+ */
+function forcedView(result) {
+  const unit = (result.units ?? []).find((entry) => entry.forced)
+  if (unit === undefined) return { ...result, unit: null }
+  return {
+    ...result,
+    unit,
+    installed: unit.installed,
+    manifest: {
+      ...result.manifest,
+      ...unit.manifest,
+      dshVersion: unit.manifest.dshVersion ?? result.manifest.dshVersion ?? '',
+      notes: unit.manifest.notes ?? result.manifest.notes ?? '',
+    },
+  }
+}
 
 function createProgressWindow() {
   progressWindow = new BrowserWindow({
@@ -264,13 +299,17 @@ function createProgressWindow() {
   return new Promise((resolve) => { progressWindow.webContents.once('did-finish-load', resolve) })
 }
 
-function reportProgress(progress) {
+/** 进度窗文案：unit 为空时按"升级包"泛称（旧调用方式）。 */
+function reportProgress(progress, unit = null) {
   if (progressWindow === null) return
+  const name = unit === null ? '升级包' : unitLabel(unit.key)
   const ratio = progress.total ? progress.received / progress.total : progress.phase === 'installing' ? 1 : 0
   const label = progress.phase === 'installing'
-    ? '正在安装（约 3–5 分钟，请勿关闭）'
+    ? '正在安装（请勿关闭）'
     : `${(progress.received / 1048576).toFixed(1)} / ${((progress.total ?? 0) / 1048576).toFixed(1)} MB`
-  const title = progress.phase === 'installing' ? '正在安装升级包…' : '正在下载升级包…'
+  const title = progress.phase === 'installing'
+    ? (unit?.key === 'plugins' ? `正在安装 ${name}…` : `正在安装 ${name}（约 3–5 分钟）…`)
+    : `正在下载 ${name}…`
   progressWindow?.webContents
     .executeJavaScript(`window.setProgress(${ratio}, ${JSON.stringify(label)}); window.setPhase(${JSON.stringify(title)})`)
     .catch(() => {})
@@ -329,22 +368,39 @@ ipcMain.on('force-upgrade', () => {
 })
 ipcMain.on('force-quit', () => quitApplication())
 
-/** 执行升级：进度窗 → 下载校验 → 备份安装 → 重启。 */
+/** 执行升级：进度窗 → 按单元逐个 下载校验 → 安装 → 全部完成后重启壳。 */
 async function upgradeAndRestart(result) {
   if (upgrading) return
   upgrading = true
   let progressReady = false
   try {
-    const manifest = result.manifest
+    const config = result.config ?? updater.updateConfig()
+    const pending = pendingUnits(result)
+    if (pending.length === 0) {
+      log('upgrade: 没有需要安装的单元')
+      return
+    }
     await createProgressWindow()
     progressReady = true
-    reportProgress({ received: 0, total: manifest.size })
-    const tarball = await updater.fetchPackage(manifest, result.config, { log, onProgress: reportProgress })
-    const installed = updater.installPackage(tarball, { config: result.config, log, onProgress: reportProgress })
+    for (const update of pending) {
+      const unit = update.manifest
+      log(`upgrade: 开始 ${unit.key} ${unit.version}`)
+      reportProgress({ received: 0, total: unit.size }, unit)
+      const tarball = await updater.fetchUnit(unit, config, {
+        log,
+        onProgress: (progress) => reportProgress(progress, unit),
+      })
+      updater.installUnit(unit, tarball, {
+        config,
+        log,
+        onProgress: (progress) => reportProgress(progress, unit),
+      })
+      log(`upgrade: ${unit.key} ${unit.version} 安装完成`)
+    }
     progressWindow?.close()
     progressWindow = null
-    notify(`已升级到 ${installed?.version ?? manifest.version}`)
-    log(`upgrade done -> ${installed?.version ?? manifest.version}`)
+    notify(`已升级：${pending.map((unit) => `${unitLabel(unit.key)} ${unit.manifest.version}`).join('，')}`)
+    log(`upgrade done -> ${versionsSummary()}`)
     await stopServer()
     app.relaunch()
     app.exit(0)
@@ -374,14 +430,16 @@ async function checkForUpdates({ silent = false } = {}) {
     return
   }
   if (result.forced) {
-    log('check: 命中强制更新（停止服务并显示强制更新窗口）')
+    const forced = forcedView(result)
+    log(`check: 命中强制更新（${unitLabel(forced.unit?.key ?? 'body')}），停止服务并显示强制更新窗口`)
     await stopServer()
-    showForcedWindow(result)
+    showForcedWindow(forced)
     return
   }
   pendingUpdate = result
+  const pending = pendingUnits(result)
   if (silent) {
-    log(`check: 发现新版本 ${result.manifest.version}（静默，等用户从托盘升级）`)
+    log(`check: 发现新版本 ${pending.map((unit) => `${unitLabel(unit.key)} ${unit.manifest.version}`).join('，')}（静默，等用户从托盘升级）`)
     return
   }
   if (AUTO) {
@@ -391,8 +449,7 @@ async function checkForUpdates({ silent = false } = {}) {
   }
   const manifest = result.manifest
   const detail = [
-    `当前版本: ${result.installed?.version ?? '未知'}`,
-    `新版本:   ${manifest.version}`,
+    ...pending.map((unit) => `${unitLabel(unit.key)} ${unit.installed?.version ?? '未知'} → ${unit.manifest.version}`),
     manifest.dshVersion ? `dsh:      ${manifest.dshVersion}` : '',
     manifest.publishedAt ? `发布时间: ${manifest.publishedAt}` : '',
     manifest.notes ? `\n更新说明:\n${manifest.notes}` : '',
@@ -400,7 +457,7 @@ async function checkForUpdates({ silent = false } = {}) {
   const answer = dialog.showMessageBoxSync({
     type: 'question',
     title: '发现新版本',
-    message: `发现新版本 ${manifest.version}`,
+    message: `发现新版本：${pending.map((unit) => `${unitLabel(unit.key)} ${unit.manifest.version}`).join('，')}`,
     detail,
     buttons: ['现在升级', '稍后'],
     defaultId: 0,
@@ -422,13 +479,14 @@ async function startupGate() {
     return true
   }
   if (result.status === 'available' && result.forced) {
-    log(`startup: 强制更新 本地 ${result.installed?.version ?? 'unknown'} < 最低 ${result.manifest.minVersion}`)
-    showForcedWindow(result)
+    const forced = forcedView(result)
+    log(`startup: 强制更新 ${unitLabel(forced.unit?.key ?? 'body')} 本地 ${forced.installed?.version ?? 'unknown'} < 最低 ${forced.manifest.minVersion}`)
+    showForcedWindow(forced)
     return false
   }
   if (result.status === 'available') {
     pendingUpdate = result
-    log(`startup: 发现新版本 ${result.manifest.version}`)
+    log(`startup: 发现新版本 ${pendingUnits(result).map((unit) => `${unitLabel(unit.key)} ${unit.manifest.version}`).join('，')}`)
   } else if (result.status === 'up-to-date') {
     log('startup: 已是最新')
   } else if (result.status === 'error') {

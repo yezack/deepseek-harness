@@ -87,11 +87,26 @@ deepin-elf-verify.service   (ExecStart=/usr/sbin/deepin-elf-verify)
 ### 2.4 用法
 
 ```
-tar xzf dsh-uos-offline-0.2.0-rc.2.tar.gz
+tar xzf dsh-uos-offline.tar.gz
 cd package
 sudo ./install.sh                      # 可 DSH_DEST=/opt/dsh 自定义位置
 /deepseek-harness/start-web.sh                  # 普通用户运行
 ```
+
+安装包拆成**本体**与**插件**两个发布单元，装到两个目录、可分别升级：
+
+| 单元 | 内容 | 分发包 | 升级入口 |
+|---|---|---|---|
+| 本体 | dsh 官方包 + 依赖树 + Node | `dsh-uos-body-<版本>.tar.gz` | `install.sh --upgrade` |
+| 插件 | 第三方插件 + 它们自己的依赖 | `dsh-uos-plugins-<版本>.tar.gz` | `install-plugins.sh --upgrade` |
+
+整包 `dsh-uos-offline.tar.gz` 同时包含两者，供新机器一次装完。插件升级只需下载
+插件包（约为整包的四分之一），且不会重装本体；本体升级不碰插件目录。桌面壳的
+「检查更新」按 `latest.json` 的 `units` 只下载真正变化的单元。
+
+拆开后插件与宿主仍是**单实例**：插件把自己的 dsh 依赖声明为 `peerDependencies`，
+由 dsh 的 profile 解析钩子提供正在运行的那一份；安装时还会在插件树里把
+`node_modules/@deepseek-ai` 软链到本体，兜底未声明 peer 的包。
 
 启动脚本会打印带 token 的地址，例如：
 
@@ -102,12 +117,14 @@ dsh web: http://127.0.0.1:3080/?token=XXXXXXXX
 ### 2.5 安装后的目录
 
 ```
-/deepseek-harness/app                   应用与全部依赖
+/deepseek-harness/app                   本体：dsh 与全部官方依赖
+/deepseek-harness/plugins/app           插件单元：第三方插件与它们的依赖
 /deepseek-harness/start-web.sh          启动脚本
-/deepseek-harness/uninstall.sh          卸载脚本
+/deepseek-harness/install-plugins.sh    插件安装/升级入口
+/deepseek-harness/uninstall.sh          卸载脚本（本体与插件一起删）
 /var/tmp/dsh-node/             Node 运行时（白名单路径）
 /var/tmp/dsh-native-cache/     原生模块缓存 + koffi（白名单路径）
-~/.dsh/                        DSH_HOME
+~/.dsh/                        DSH_HOME（profile 里只有指向插件目录的软链）
 ```
 
 > `/var/tmp` 可能被系统清理。若 node 丢失，重新执行 `sudo ./install.sh` 即可。

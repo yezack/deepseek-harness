@@ -14,6 +14,18 @@ DEST="${1:-${DSH_DEST:-/deepseek-harness}}"
 NODE_BIN="$DEST/node/bin/node"
 [ -x "$NODE_BIN" ] || NODE_BIN="/var/tmp/dsh-node/bin/node"
 PROFILE_HOME="${DSH_HOME:-$HOME/.dsh}/profiles/web"
+# 插件是独立发布单元，装在自己的目录；旧布局（插件混在本体树里）自动回落。
+PLUGIN_ROOT="$DEST/plugins/app"
+[ -d "$PLUGIN_ROOT/node_modules" ] || PLUGIN_ROOT="$DEST/app"
+# 某个包实际落在哪棵树：插件树优先，其次本体树。
+modpath() {
+  local name="$1"
+  if [ -d "$PLUGIN_ROOT/node_modules/$name" ]; then
+    printf '%s\n' "$PLUGIN_ROOT/node_modules/$name"
+  else
+    printf '%s\n' "$DEST/app/node_modules/$name"
+  fi
+}
 PASS=0; WARN=0; FAIL=0; SKIP=0
 
 ok()   { echo "  [PASS] $*"; PASS=$((PASS + 1)); }
@@ -57,10 +69,11 @@ for mod in \
   "node-pty" \
   "koffi" \
   "sharp"; do
-  if "$NODE_BIN" -e "require('$DEST/app/node_modules/$mod')" >/dev/null 2>&1; then
+  MOD_PATH="$(modpath "$mod")"
+  if "$NODE_BIN" -e "require('$MOD_PATH')" >/dev/null 2>&1; then
     echo "      OK   $mod"
   else
-    MSG="$("$NODE_BIN" -e "try{require('$DEST/app/node_modules/$mod')}catch(e){console.log(e.message.split('\n')[0])}" 2>&1 | tail -1)"
+    MSG="$("$NODE_BIN" -e "try{require('$MOD_PATH')}catch(e){console.log(e.message.split('\n')[0])}" 2>&1 | tail -1)"
     case "$mod" in
       @univerjs-pro/*) warn "$mod 加载失败（univer 功能不可用）: $MSG";;
       *) echo "      FAIL $mod: $MSG"; NM_FAIL=$((NM_FAIL + 1));;
@@ -79,7 +92,7 @@ if [ -f "$DEST/seed-profile.sh" ]; then
     MISMATCH=0
     for item in $BUNDLES; do
       name="${item%@*}"; want="${item##*@}"
-      got="$("$NODE_BIN" -p "require('$DEST/app/node_modules/$name/package.json').version" 2>/dev/null || true)"
+      got="$("$NODE_BIN" -p "require('$(modpath "$name")/package.json').version" 2>/dev/null || true)"
       if [ -z "$got" ]; then
         echo "      MISS $name（未安装，期望 $want）"; MISMATCH=$((MISMATCH + 1))
       elif [ "$got" = "$want" ]; then
@@ -89,6 +102,13 @@ if [ -f "$DEST/seed-profile.sh" ]; then
       fi
     done
     [ "$MISMATCH" -eq 0 ] && ok "12 个预装插件版本与清单一致" || warn "$MISMATCH 个插件与清单不一致"
+    echo "      插件单元: $PLUGIN_ROOT"
+    if [ -f "$DEST/plugins/.installed-version" ]; then
+      PLUG_VER="$(grep -o '"version": *"[^"]*"' "$DEST/plugins/.installed-version" 2>/dev/null | head -1 | cut -d'"' -f4)"
+      ok "插件单元版本: ${PLUG_VER:-未知}"
+    elif [ "$PLUGIN_ROOT" = "$DEST/app" ]; then
+      warn "插件混在本体树里（旧布局；新包会把插件装到 $DEST/plugins）"
+    fi
   fi
 else
   skip "找不到 $DEST/seed-profile.sh"
@@ -179,7 +199,7 @@ if [ -f "$PATCH" ]; then
   fi
   # 孤儿判定：entry 多数来自各 bundle 的 cordis.patch.yml（webserver/univer/dream-skin
   # 都不在 profile 的 cordis.yml 文本里），必须把 bundle patch 的 id 一并算作已知。
-  KNOWN="$(find "$DEST/app/node_modules" -maxdepth 3 -name 'cordis.patch.yml' -exec grep -hoE '^\s*-\s*id:\s*\S+' {} + 2>/dev/null | sed -E 's/^\s*-\s*id:\s*//' | sort -u)"
+  KNOWN="$(find "$DEST/app/node_modules" "$PLUGIN_ROOT/node_modules" -maxdepth 3 -name 'cordis.patch.yml' -exec grep -hoE '^\s*-\s*id:\s*\S+' {} + 2>/dev/null | sed -E 's/^\s*-\s*id:\s*//' | sort -u)"
   KNOWN="$KNOWN$(printf '\n%s' "$(grep -oE '^\s*-\s*id:\s*\S+' "$PROFILE_HOME/cordis.yml" 2>/dev/null | sed -E 's/^\s*-\s*id:\s*//')")"
   if [ -z "$KNOWN" ]; then
     skip "无法枚举已知 entry，跳过孤儿行检查"
@@ -255,8 +275,10 @@ if [ -x "$GLIBC_DIR/ld-linux-x86-64.so.2" ] && [ -x "$NODE_GLIBC" ]; then
     bad "wrapper 无法运行（$NODE_GLIBC）"
   fi
   # 这是最关键的一项：宿主 glibc 太旧时，univer 的绑定只能靠兼容运行时加载。
-  if "$NODE_GLIBC" -e "require('$DEST/app/node_modules/@univerjs-pro/engine-formula-rust-binding')" >/dev/null 2>&1 \
-     && "$NODE_GLIBC" -e "require('$DEST/app/node_modules/@univerjs-pro/exchange-node-binding')" >/dev/null 2>&1; then
+  UNIVER_FORMULA="$(modpath '@univerjs-pro/engine-formula-rust-binding')"
+  UNIVER_EXCHANGE="$(modpath '@univerjs-pro/exchange-node-binding')"
+  if "$NODE_GLIBC" -e "require('$UNIVER_FORMULA')" >/dev/null 2>&1 \
+     && "$NODE_GLIBC" -e "require('$UNIVER_EXCHANGE')" >/dev/null 2>&1; then
     ok "univer 两个原生绑定在兼容运行时下可加载（office 内容读写可用）"
   else
     warn "univer 原生绑定在兼容运行时下仍加载失败"

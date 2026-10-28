@@ -1,9 +1,21 @@
 #!/bin/bash
 # DeepSeek Harness - UOS 离线安装
+#
+# 安装包分成两个独立的发布单元，装到两个目录：
+#
+#   $DSH_DEST/app/            本体（dsh 官方包 + 依赖树）
+#   $DSH_DEST/node/           Node 22 运行时（复制到白名单路径 /var/tmp/dsh-node）
+#   $DSH_DEST/plugins/app/    插件（第三方插件 + 它们自己的依赖）
+#
+# 本脚本只装本体；插件由 install-plugins.sh 装（整包里含插件载荷时本脚本会顺带
+# 调用它）。升级本体不碰 $DSH_DEST/plugins，升级插件不重装本体。
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="${DSH_DEST:-/deepseek-harness}"
-INSTALL_NODE_DIR="/var/tmp/dsh-node"
+PLUGINS_DIR="$DEST/plugins"
+# 白名单运行时目录。可用环境变量覆盖，便于在同一台机器上做并行试装
+# （默认值就是生产路径 /var/tmp/dsh-node 与 /var/tmp/dsh-electron）。
+INSTALL_NODE_DIR="${DSH_NODE_DIR:-/var/tmp/dsh-node}"
 # 默认升级服务器（可用 DSH_UPDATE_URL 覆盖）。写入客户端 update.json，托盘「检查更新」从这里取清单。
 DEFAULT_UPDATE_URL="http://autoupdate.kxzd.sjq.sh/deepseek_harness/latest.json"
 
@@ -11,21 +23,99 @@ DEFAULT_UPDATE_URL="http://autoupdate.kxzd.sjq.sh/deepseek_harness/latest.json"
 #   1) 不询问浏览器升级（沿用现有浏览器）；
 #   2) 保留 profile / 桌面入口 / update.json（不重配环境）；
 #   3) 结束时写 .installed-version，供下一次"检查更新"比较。
+#   另外：不碰 $DEST/plugins（插件是独立单元）。
+# --seed-only：只重播 profile（install-plugins.sh 换完插件树后调用）。
 UPGRADE=0
+SEED_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --upgrade) UPGRADE=1 ;;
+    --seed-only) SEED_ONLY=1 ;;
     --help|-h)
-      echo "用法: sudo ./install.sh [--upgrade]"
-      echo "  --upgrade  升级安装（保留 profile；由桌面壳自动调用）"
+      echo "用法: sudo ./install.sh [--upgrade|--seed-only]"
+      echo "  --upgrade    升级安装（保留 profile 与插件；由桌面壳自动调用）"
+      echo "  --seed-only  只重播 profile 预装插件清单"
       exit 0 ;;
   esac
 done
 if [ "$UPGRADE" = "1" ]; then
   # 升级不碰浏览器：直接走"跳过浏览器升级"的既有分支。
   export DSH_BROWSER_UPGRADE="${DSH_BROWSER_UPGRADE:-n}"
+fi
+
+# ============ profile 播种（安装/升级/插件换版后唯一的写入口） ============
+# 设计约定：**写 profile 只发生在安装/升级阶段**（以及手动重跑 seed-profile.sh）。
+# start-web.sh 只做只读预检，不再每次重启都改用户配置 —— 早先把 seeding 放在
+# 启动里，维护脚本一有 bug 就会反复破坏用户配置（模型条目被当孤儿删掉）。
+TARGET_USER="${DSH_USER:-${SUDO_USER:-}}"
+TARGET_HOME=""
+seed_profile() {
+  if [ ! -f "$DEST/seed-profile.sh" ]; then
+    echo "      [警告] 缺少 $DEST/seed-profile.sh，跳过 profile 播种"
+    return 0
+  fi
+  if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+    if [ -n "${DSH_USER:-}" ] && [ "$TARGET_USER" = "root" ]; then
+      echo "      [警告] DSH_USER=root 不可用：profile 应属于桌面登录用户"
+    else
+      echo "      [警告] 无法确定 profile 的目标用户（DSH_USER / SUDO_USER 都为空）"
+      echo "             profile 未播种；稍后请以桌面用户身份执行："
+      echo "             DSH_HOME=\$HOME/.dsh $DEST/seed-profile.sh $DEST"
+    fi
+    return 0
+  fi
+  TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+  if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
+    echo "      [警告] 用户 $TARGET_USER 的家目录不存在，跳过 profile 播种"
+    return 0
+  fi
+  local DSH_HOME_DIR="$TARGET_HOME/.dsh"
+  local PROFILE_DIR="$DSH_HOME_DIR/profiles/web"
+  local TARGET_GROUP
+  TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")"
+  install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$DSH_HOME_DIR" "$PROFILE_DIR" 2>/dev/null || true
+  # 写 profile 前留带时间戳的备份，只保留最近 3 份。
+  if [ -f "$PROFILE_DIR/cordis.patch.yml" ]; then
+    cp -p "$PROFILE_DIR/cordis.patch.yml" "$PROFILE_DIR/cordis.patch.yml.$(date +%Y%m%d-%H%M%S).bak"
+    ls -1t "$PROFILE_DIR"/cordis.patch.yml.*.bak 2>/dev/null | tail -n +4 | xargs -r rm -f
+  fi
+  echo "      播种 profile（用户 $TARGET_USER）..."
+  local SEED_OUT SEED_OK
+  if [ "$(id -u)" = "0" ] && [ "$TARGET_USER" != "root" ]; then
+    # 先收输出再打印：管道会把退出码替换成 sed 的，失败会被静默吞掉（踩过）。
+    if command -v sudo >/dev/null 2>&1; then
+      SEED_OUT="$(sudo -u "$TARGET_USER" -H env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
+        "$DEST/seed-profile.sh" "$DEST" 2>&1)"
+      SEED_OK=$?
+    else
+      SEED_OUT="$(runuser -u "$TARGET_USER" -- env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
+        "$DEST/seed-profile.sh" "$DEST" 2>&1)"
+      SEED_OK=$?
+    fi
+    printf '%s\n' "$SEED_OUT" | sed 's/^/      /'
+    if [ "${SEED_OK:-0}" = "0" ]; then
+      echo "      profile 已就绪: $PROFILE_DIR"
+    else
+      echo "      [警告] profile 播种失败（退出码 $SEED_OK），请手动执行："
+      echo "             sudo -u $TARGET_USER $DEST/seed-profile.sh $DEST"
+    fi
+  else
+    env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
+      "$DEST/seed-profile.sh" "$DEST" 2>&1 | sed 's/^/      /' || true
+  fi
+}
+
+if [ "$SEED_ONLY" = "1" ]; then
   echo "============================================"
-  echo "  DeepSeek Harness - 升级安装"
+  echo "  DeepSeek Harness - 重播 profile"
+  echo "============================================"
+  seed_profile
+  exit 0
+fi
+
+if [ "$UPGRADE" = "1" ]; then
+  echo "============================================"
+  echo "  DeepSeek Harness - 升级安装（本体）"
   echo "============================================"
   echo
 fi
@@ -35,7 +125,8 @@ echo "  DeepSeek Harness - UOS 离线安装"
 echo "  dsh 0.2.1-rc.2 / Node 22.23.2"
 echo "============================================"
 echo
-echo "  安装位置: $DEST"
+echo "  本体安装位置: $DEST"
+echo "  插件安装位置: $PLUGINS_DIR"
 echo "  （可用环境变量 DSH_DEST 覆盖，例如：DSH_DEST=/opt/dsh ./install.sh）"
 echo
 
@@ -64,20 +155,61 @@ $BACKUPS
 EOF
 fi
 
-# 1. 展开 node 与 app
-echo "[1/3] 解压 Node 22 ..."
+# 旧布局标记：插件曾混在本体树里（$DEST/app/node_modules/<插件>）。
+# 这次安装会整棵替换 app/，所以纯本体包升级上去会让插件消失 —— 下面会提示改用整包。
+LEGACY_PLUGINS=0
+if [ -d "$DEST/app/node_modules/dsh-ga-controller" ] && [ ! -d "$PLUGINS_DIR/app" ]; then
+  LEGACY_PLUGINS=1
+fi
+
+# 1. 展开 node 与本体
+echo "[1/7] 解压 Node 22 ..."
 rm -rf "$DEST/node"
 mkdir -p "$DEST"
 unzip -q -o "$HERE/node.zip" -d "$DEST"
 if [ ! -x "$DEST/node/bin/node" ]; then echo "[错误] Node 解压失败"; exit 1; fi
 
-echo "[2/3] 解压 DeepSeek Harness 应用（约 1.3GB，请稍候）..."
+echo "[2/7] 解压 DeepSeek Harness 本体（请稍候）..."
+# 旧包装的是 app.zip、新包叫 body.zip；两者解出来的目录名都是 app/。
+BODY_ZIP="$HERE/body.zip"
+[ -f "$BODY_ZIP" ] || BODY_ZIP="$HERE/app.zip"
+if [ ! -f "$BODY_ZIP" ]; then echo "[错误] 包内没有 body.zip/app.zip"; exit 1; fi
 rm -rf "$DEST/app"
-unzip -q -o "$HERE/app.zip" -d "$DEST"
-if [ ! -f "$DEST/app/node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then echo "[错误] 应用解压失败"; exit 1; fi
+unzip -q -o "$BODY_ZIP" -d "$DEST"
+if [ ! -f "$DEST/app/node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then echo "[错误] 本体解压失败"; exit 1; fi
 
+# 预置脚本随包发布，由 start-web.sh 每次启动前调用（幂等）。
+if [ ! -f "$HERE/seed-profile.sh" ]; then
+  echo "[错误] 缺少 $HERE/seed-profile.sh"
+  exit 1
+fi
+cp "$HERE/seed-profile.sh" "$DEST/seed-profile.sh"
+# 用绝对模式，不用 chmod +x：从 Windows 经 SFTP 带过来的文件可能是 711，
+# +x 不会补上组/其他的读位，而 bash 解析脚本需要读权限 —— 结果是启动时
+# 静默失败、插件全部停用。
+chmod 755 "$DEST/seed-profile.sh"
+
+# 局域网访问脚本：0.2.1 只能绑一个具体地址，同时服务回环与局域网需要 DNAT 转发。
+# 安装时不自动执行（改防火墙要操作员知情），README 里写明用法。
+if [ -f "$HERE/enable-lan.sh" ]; then
+  cp "$HERE/enable-lan.sh" "$DEST/enable-lan.sh"
+  chmod 755 "$DEST/enable-lan.sh"
+fi
+
+# 自检与运维脚本（D4）。doctor 每次启动前由 start-web.sh 简要跑一遍也可以，
+# 但为避免拖慢启动，只在安装结束时提示操作员手动执行。
+for tool in doctor.sh collect-logs.sh maintain-profile.mjs; do
+  if [ -f "$HERE/$tool" ]; then
+    cp "$HERE/$tool" "$DEST/$tool"
+    case "$tool" in
+      *.sh) chmod 755 "$DEST/$tool" ;;
+      *) chmod 644 "$DEST/$tool" ;;
+    esac
+  fi
+done
+
+echo "[3/7] 把 node 放到白名单目录 $INSTALL_NODE_DIR ..."
 # 3. 把 node 放到白名单目录（UOS 的 deepin-elf-verify 只允许白名单路径执行二进制）
-echo "[3/3] 安装 Node 到白名单路径 $INSTALL_NODE_DIR ..."
 rm -rf "$INSTALL_NODE_DIR"
 mkdir -p "$INSTALL_NODE_DIR"
 cp -r "$DEST/node/." "$INSTALL_NODE_DIR/"
@@ -146,15 +278,24 @@ fi
 # 关键取舍：**宿主 DSH 仍用系统 glibc**，只有显式使用 wrapper 的插件子进程走新
 # glibc（univer 的 Gateway / Unit Content Worker）。这避免换掉整个运行时带来的
 # NSS、系统库混用等风险；其他插件遇到同类问题可以直接复用这个 wrapper。
-GLIBC_DIR="/var/tmp/dsh-glibc"
+GLIBC_DIR="${DSH_GLIBC_DIR:-/var/tmp/dsh-glibc}"
 NODE_GLIBC="$INSTALL_NODE_DIR/bin/node-glibc"
 GLIBC_TARBALL=""
 for candidate in "$HERE"/tools/glibc*.tar.gz; do
   [ -f "$candidate" ] && { GLIBC_TARBALL="$candidate"; break; }
 done
 if [ -n "$GLIBC_TARBALL" ]; then
-  rm -rf "$GLIBC_DIR"
-  tar xzf "$GLIBC_TARBALL" -C /var/tmp
+  # 先解到临时目录再整体换上：正在跑的 univer 子进程不会在中途读到半份 libc，
+  # 也避免"解到 /var/tmp 再用"把自定义的 DSH_GLIBC_DIR 覆盖掉。
+  GLIBC_STAGE="$(mktemp -d /var/tmp/dsh-glibc-stage.XXXXXX)"
+  tar xzf "$GLIBC_TARBALL" -C "$GLIBC_STAGE"
+  GLIBC_SRC="$(find "$GLIBC_STAGE" -maxdepth 1 -mindepth 1 -type d | head -1)"
+  if [ -n "$GLIBC_SRC" ]; then
+    rm -rf "$GLIBC_DIR"
+    mkdir -p "$(dirname "$GLIBC_DIR")"
+    mv "$GLIBC_SRC" "$GLIBC_DIR"
+  fi
+  rm -rf "$GLIBC_STAGE"
   chmod 755 "$GLIBC_DIR/ld-linux-x86-64.so.2" 2>/dev/null || true
   cat > "$NODE_GLIBC" <<GLIBC_WRAPPER
 #!/bin/sh
@@ -166,6 +307,28 @@ GLIBC_WRAPPER
   echo "      兼容运行时: $("$NODE_GLIBC" --version 2>/dev/null || echo '不可用')  [$("$GLIBC_DIR/ld-linux-x86-64.so.2" --version 2>/dev/null | head -1)]"
 else
   echo "      [提示] 包内没有 tools/glibc*.tar.gz，跳过兼容运行时（需要新 glibc 的插件不可用）"
+fi
+
+echo "[4/7] 插件单元 ..."
+if [ -f "$HERE/plugins.zip" ] || [ -f "$HERE/plugins/plugins.zip" ] || [ -d "$HERE/plugins-app" ]; then
+  if [ -f "$HERE/install-plugins.sh" ]; then
+    echo "      发现插件载荷，安装到 $PLUGINS_DIR ..."
+    # 播种统一由本脚本在最后做（一次），插件脚本只换目录。
+    PLUGIN_ARGS=()
+    [ "$UPGRADE" = "1" ] && PLUGIN_ARGS+=(--upgrade)
+    DSH_DEST="$DEST" DSH_PLUGINS_SKIP_SEED=1 bash "$HERE/install-plugins.sh" "${PLUGIN_ARGS[@]}"
+  else
+    echo "      [警告] 包内有插件载荷但缺 install-plugins.sh，跳过插件安装"
+  fi
+else
+  if [ "$LEGACY_PLUGINS" = "1" ]; then
+    echo "      [警告] 这是旧布局（插件混在本体树里），本体已整棵替换，插件需要重新安装。"
+    echo "             请改用整包安装，或装完本体后执行： sudo ./install-plugins.sh"
+  elif [ "$UPGRADE" = "1" ]; then
+    echo "      纯本体升级包：保留现有插件目录 $PLUGINS_DIR 不动"
+  else
+    echo "      [提示] 包内没有插件载荷，只装本体（插件可用 install-plugins.sh 单独安装）"
+  fi
 fi
 
 # 系统浏览器升级（可选）。系统浏览器 = /usr/share/browser，跑 DSH UI 的那个。
@@ -243,93 +406,14 @@ CHROME_HOME="/var/tmp/dsh-chrome-home"
 mkdir -p "$CHROME_HOME"
 chmod 1777 "$CHROME_HOME" 2>/dev/null || true
 
-# 预置脚本随包发布，由 start-web.sh 每次启动前调用（幂等）。
-if [ ! -f "$HERE/seed-profile.sh" ]; then
-  echo "[错误] 缺少 $HERE/seed-profile.sh"
-  exit 1
-fi
-cp "$HERE/seed-profile.sh" "$DEST/seed-profile.sh"
-# 用绝对模式，不用 chmod +x：从 Windows 经 SFTP 带过来的文件可能是 711，
-# +x 不会补上组/其他的读位，而 bash 解析脚本需要读权限 —— 结果是启动时
-# 静默失败、插件全部停用。
-chmod 755 "$DEST/seed-profile.sh"
+echo "[5/7] 播种 profile ..."
+seed_profile
 
-# 局域网访问脚本：0.2.1 只能绑一个具体地址，同时服务回环与局域网需要 DNAT 转发。
-# 安装时不自动执行（改防火墙要操作员知情），README 里写明用法。
-if [ -f "$HERE/enable-lan.sh" ]; then
-  cp "$HERE/enable-lan.sh" "$DEST/enable-lan.sh"
-  chmod 755 "$DEST/enable-lan.sh"
-fi
-
-# 自检与运维脚本（D4）。doctor 每次启动前由 start-web.sh 简要跑一遍也可以，
-# 但为避免拖慢启动，只在安装结束时提示操作员手动执行。
-for tool in doctor.sh collect-logs.sh maintain-profile.mjs; do
-  if [ -f "$HERE/$tool" ]; then
-    cp "$HERE/$tool" "$DEST/$tool"
-    case "$tool" in
-      *.sh) chmod 755 "$DEST/$tool" ;;
-      *) chmod 644 "$DEST/$tool" ;;
-    esac
-  fi
-done
-
-# ============ 以目标用户身份播种 profile ============
-# 设计约定：**写 profile 只发生在安装/升级阶段**（以及手动重跑 seed-profile.sh）。
-# start-web.sh 只做只读预检，不再每秒重启都改用户配置 —— 早先把 seeding 放在
-# 启动里，维护脚本一有 bug 就会反复破坏用户配置（模型条目被当孤儿删掉）。
-TARGET_USER="${DSH_USER:-${SUDO_USER:-}}"
-if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
-  if [ -n "${DSH_USER:-}" ] && [ "$TARGET_USER" = "root" ]; then
-    echo "      [警告] DSH_USER=root 不可用：profile 应属于桌面登录用户"
-  else
-    echo "      [警告] 无法确定 profile 的目标用户（DSH_USER / SUDO_USER 都为空）"
-    echo "             profile 未播种；稍后请以桌面用户身份执行："
-    echo "             DSH_HOME=\$HOME/.dsh $DEST/seed-profile.sh $DEST"
-  fi
-else
-  TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
-  if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
-    echo "      [警告] 用户 $TARGET_USER 的家目录不存在，跳过 profile 播种"
-  else
-    DSH_HOME_DIR="$TARGET_HOME/.dsh"
-    PROFILE_DIR="$DSH_HOME_DIR/profiles/web"
-    TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")"
-    install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$DSH_HOME_DIR" "$PROFILE_DIR" 2>/dev/null || true
-    # 写 profile 前留带时间戳的备份，只保留最近 3 份。
-    if [ -f "$PROFILE_DIR/cordis.patch.yml" ]; then
-      cp -p "$PROFILE_DIR/cordis.patch.yml" "$PROFILE_DIR/cordis.patch.yml.$(date +%Y%m%d-%H%M%S).bak"
-      ls -1t "$PROFILE_DIR"/cordis.patch.yml.*.bak 2>/dev/null | tail -n +4 | xargs -r rm -f
-    fi
-    echo "      播种 profile（用户 $TARGET_USER）..."
-    if [ "$(id -u)" = "0" ] && [ "$TARGET_USER" != "root" ]; then
-      # 先收输出再打印：管道会把退出码替换成 sed 的，失败会被静默吞掉（踩过）。
-      if command -v sudo >/dev/null 2>&1; then
-        SEED_OUT="$(sudo -u "$TARGET_USER" -H env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
-          "$DEST/seed-profile.sh" "$DEST" 2>&1)"
-        SEED_OK=$?
-      else
-        SEED_OUT="$(runuser -u "$TARGET_USER" -- env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
-          "$DEST/seed-profile.sh" "$DEST" 2>&1)"
-        SEED_OK=$?
-      fi
-      printf '%s\n' "$SEED_OUT" | sed 's/^/      /'
-      if [ "${SEED_OK:-0}" = "0" ]; then
-        echo "      profile 已就绪: $PROFILE_DIR"
-      else
-        echo "      [警告] profile 播种失败（退出码 $SEED_OK），请手动执行："
-        echo "             sudo -u $TARGET_USER $DEST/seed-profile.sh $DEST"
-      fi
-    else
-      env DSH_HOME="$DSH_HOME_DIR" SEED_NODE="$INSTALL_NODE_DIR/bin/node" \
-        "$DEST/seed-profile.sh" "$DEST" 2>&1 | sed 's/^/      /' || true
-    fi
-  fi
-fi
-
+echo "[6/7] 可选桌面壳 ..."
 # ============ 可选桌面壳（Electron：主窗口 + 托盘，接管服务进程） ============
 # 只替代浏览器：窗口加载 127.0.0.1:3080；服务由壳拉起，退出壳时结束整个进程组。
 # 托盘：打开 Agent / 在浏览器打开 / 重启服务 / 退出。
-ELECTRON_DIR="/var/tmp/dsh-electron"
+ELECTRON_DIR="${DSH_ELECTRON_DIR:-/var/tmp/dsh-electron}"
 DESKTOP_OK=0
 if [ "${DSH_DESKTOP:-1}" != "0" ] && [ -f "$HERE/desktop/electron-v44.7.0-linux-x64.zip" ] && [ -f "$HERE/desktop/app/main.js" ]; then
   echo "      安装桌面壳（Electron）..."
@@ -405,12 +489,14 @@ else
   echo "      [提示] 包内没有 desktop/ 载荷，跳过桌面壳"
 fi
 
+echo "[7/7] 生成启动脚本与版本标记 ..."
 # 生成启动前的只读预检脚本（不修改任何文件；只报告问题并给出修复命令）。
 cat > "$DEST/preflight.sh" <<'PREFLIGHT_TEMPLATE'
 #!/bin/bash
 # 启动前只读预检。不写任何文件；发现问题只打印提示与修复命令。
 set -u
 PREFLIGHT_DEST="__DEST__"
+PREFLIGHT_PLUGINS="__PLUGINS__"
 export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PREFLIGHT_NODE="__NODE__"
 PROFILE="$DSH_HOME/profiles/web"
@@ -431,8 +517,9 @@ const profile = process.argv[1]
 let manifest
 try { manifest = JSON.parse(fs.readFileSync(path.join(profile, "package.json"), "utf8")) } catch (error) { process.exit(0) }
 const bundles = (manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles) || []
-// 官方 @deepseek-ai/* 由应用自身的 node_modules 提供，不在 profile 里链接。
+// 官方 @deepseek-ai/* 由本体自身的 node_modules 提供，不在 profile 里链接。
 const thirdParty = bundles.filter((name) => !name.startsWith('@deepseek-ai/'))
+// 软链必须解析到已存在的包（插件树被换掉/删掉时这里是空）。
 const missing = thirdParty.filter((name) => !fs.existsSync(path.join(profile, "node_modules", name, "package.json")))
 if (missing.length > 0) console.log(missing.join(" "))
 ' "$PROFILE" 2>/dev/null)"
@@ -448,7 +535,7 @@ if (missing.length > 0) console.log(missing.join(" "))
   fi
   if [ -f "$PROFILE/.dsh-offline-state.json" ]; then
     SEEDED="$("$PREFLIGHT_NODE" -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).dshVersion' "$PROFILE/.dsh-offline-state.json" 2>/dev/null)"
-    WANT="$("$PREFLIGHT_NODE" -p 'require(process.argv[1]).version' "__DEST__/app/node_modules/@deepseek-ai/dsh/package.json" 2>/dev/null)"
+    WANT="$("$PREFLIGHT_NODE" -p 'require(process.argv[1]).version' "$PREFLIGHT_DEST/app/node_modules/@deepseek-ai/dsh/package.json" 2>/dev/null)"
     if [ -n "$SEEDED" ] && [ -n "$WANT" ] && [ "$SEEDED" != "$WANT" ]; then
       note "profile 由 dsh $SEEDED 播种，当前安装是 $WANT"
       fix "$PREFLIGHT_DEST/seed-profile.sh $PREFLIGHT_DEST（同步预装插件版本）"
@@ -459,6 +546,16 @@ if (missing.length > 0) console.log(missing.join(" "))
     fix "$PREFLIGHT_DEST/seed-profile.sh $PREFLIGHT_DEST"
     problems=$((problems + 1))
   fi
+  # 插件单元版本：改了插件树但没重播 profile 时这里会不一致（版本文件由安装脚本写）。
+  if [ -f "$PREFLIGHT_PLUGINS/.installed-version" ] && [ -f "$PROFILE/.dsh-offline-state.json" ]; then
+    PLUG_WANT="$("$PREFLIGHT_NODE" -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).version' "$PREFLIGHT_PLUGINS/.installed-version" 2>/dev/null)"
+    PLUG_SEEDED="$("$PREFLIGHT_NODE" -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).pluginsVersion' "$PROFILE/.dsh-offline-state.json" 2>/dev/null)"
+    if [ -n "$PLUG_WANT" ] && [ "$PLUG_WANT" != "unknown" ] && [ "$PLUG_SEEDED" != "$PLUG_WANT" ]; then
+      note "插件单元版本 $PLUG_WANT，profile 播种的是 ${PLUG_SEEDED:-（无记录）}"
+      fix "$PREFLIGHT_DEST/seed-profile.sh $PREFLIGHT_DEST"
+      problems=$((problems + 1))
+    fi
+  fi
 fi
 if [ "$problems" -gt 0 ]; then
   echo "  [预检] 共 $problems 个问题；服务仍会启动，但插件可能不完整"
@@ -466,13 +563,14 @@ fi
 exit 0
 PREFLIGHT_TEMPLATE
 # 把安装期的路径固化进去（模板用占位符避免 heredoc 转义地狱）。
-sed -i "s|__DEST__|$DEST|g; s|__NODE__|$INSTALL_NODE_DIR/bin/node|g" "$DEST/preflight.sh"
+sed -i "s|__DEST__|$DEST|g; s|__PLUGINS__|$PLUGINS_DIR|g; s|__NODE__|$INSTALL_NODE_DIR/bin/node|g" "$DEST/preflight.sh"
 chmod 755 "$DEST/preflight.sh"
 
 # 生成启动脚本
 cat > "$DEST/start-web.sh" <<LAUNCH
 #!/bin/bash
 DEST="$DEST"
+PLUGINS="$PLUGINS_DIR"
 export DSH_HOME="\${DSH_HOME:-\$HOME/.dsh}"
 export PATH="$INSTALL_NODE_DIR/bin:\$PATH"
 export NARB_NATIVE_CACHE_DIR=/var/tmp/dsh-native-cache
@@ -481,7 +579,7 @@ export NARB_NATIVE_CACHE_DIR=/var/tmp/dsh-native-cache
 # profile so a non-default DSH_DEST needs no further edit.
 export DSH_CHROME_DEVTOOLS_MCP="$DEST/app/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
 export DSH_CHROME_PATH="\${DSH_CHROME_PATH:-$CHROME_BIN}"
-# 浏览器子进程的 $HOME：安装时选定的可写目录。MCP 行把它注入子进程环境，
+# 浏览器子进程的 \$HOME：安装时选定的可写目录。MCP 行把它注入子进程环境，
 # 360 的 crashpad 才有地方写 --database。
 export DSH_CHROME_HOME="\${DSH_CHROME_HOME:-$CHROME_HOME}"
 # UOS 的 deepin 浏览器 headless 必崩（trap int3），只能跑在桌面会话上，
@@ -509,6 +607,11 @@ if [ -x "$NODE_GLIBC" ]; then
 else
   echo "  [提示] 兼容运行时未安装（$NODE_GLIBC 不存在）"
 fi
+if [ -d "\$PLUGINS/app/node_modules" ]; then
+  echo "  插件单元:     \$PLUGINS/app（\$(cat "\$PLUGINS/.installed-version" 2>/dev/null | grep -o '"version": *"[^"]*"' | head -1 | cut -d'"' -f4)）"
+else
+  echo "  [提示] 插件单元未安装（\$PLUGINS），只有本体可用"
+fi
 echo "============================================"
 echo "  DeepSeek Harness - Web 服务"
 echo "  浏览器打开下面打印的带 token 的地址"
@@ -521,7 +624,7 @@ chmod +x "$DEST/start-web.sh"
 # 生成卸载脚本
 cat > "$DEST/uninstall.sh" <<UNINST
 #!/bin/bash
-echo "将删除：$DEST 以及 $INSTALL_NODE_DIR"
+echo "将删除：$DEST（含插件单元 $PLUGINS_DIR）以及 $INSTALL_NODE_DIR"
 read -p "确认？(y/N) " a
 [ "\$a" = "y" ] || exit 0
 rm -rf "$DEST" "$INSTALL_NODE_DIR" /var/tmp/dsh-native-cache
@@ -530,7 +633,8 @@ UNINST
 chmod +x "$DEST/uninstall.sh"
 
 # 记录安装版本，供桌面壳「检查更新」比较。VERSION 由 make-package.sh 写进包内。
-INSTALLED_VERSION="$(cat "$HERE/VERSION" 2>/dev/null || echo unknown)"
+# VERSION-BODY 是本体单元的版本；旧包只有 VERSION（两者相同）。
+INSTALLED_VERSION="$(cat "$HERE/VERSION-BODY" 2>/dev/null || cat "$HERE/VERSION" 2>/dev/null || echo unknown)"
 DSH_VER="$("$INSTALL_NODE_DIR/bin/node" -p "require('$DEST/app/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
 cat > "$DEST/.installed-version" <<VERSIONFILE
 {
@@ -549,10 +653,16 @@ elif [ ! -f "$DEST/update.json" ] || ! grep -q '"manifestUrl"[[:space:]]*:[[:spa
   printf '{\n  "manifestUrl": "%s"\n}\n' "$DEFAULT_UPDATE_URL" > "$DEST/update.json"
 fi
 
+PLUGIN_VERSION=""
+if [ -f "$PLUGINS_DIR/.installed-version" ]; then
+  PLUGIN_VERSION="$("$INSTALL_NODE_DIR/bin/node" -p "JSON.parse(require('node:fs').readFileSync('$PLUGINS_DIR/.installed-version','utf8')).version" 2>/dev/null || echo unknown)"
+fi
+
 echo
 echo "============================================"
 echo "  安装完成"
-echo "  当前版本:  $INSTALLED_VERSION  （dsh $DSH_VER）"
+echo "  本体版本:  $INSTALLED_VERSION  （dsh $DSH_VER）"
+[ -n "$PLUGIN_VERSION" ] && echo "  插件版本:  $PLUGIN_VERSION" || echo "  插件版本:  未安装"
 echo "  启动 Web:  $DEST/start-web.sh"
 echo "  浏览器访问: http://127.0.0.1:3080/"
 echo "  部署自检:  $DEST/doctor.sh        （PASS/WARN/FAIL 体检）"
@@ -564,6 +674,6 @@ echo "  局域网访问: sudo $DEST/enable-lan.sh   （0.2.1 需 DNAT 才能同�
 echo "  兼容运行时: $NODE_GLIBC   （新 glibc，供 univer 等插件子进程）"
 echo "  更新源:    $UPDATE_URL_EFFECTIVE"
 if [ -z "${DSH_UPDATE_URL:-}" ]; then
-  echo "             （默认服务器；可用 DSH_UPDATE_URL=… 覆盖，登录后也可改 /deepseek-harness/update.json）"
+  echo "             （默认服务器；可用 DSH_UPDATE_URL=… 覆盖，登录后也可改 $DEST/update.json）"
 fi
 echo "============================================"

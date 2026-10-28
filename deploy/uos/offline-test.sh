@@ -26,6 +26,8 @@ echo "--- 启动日志 ---"; cat "$LOG"
 echo "--- 监听 ---"; ss -ltn 2>/dev/null | grep 3080 || echo "  3080 未监听"
 
 echo "=== 3. 预装插件是否进入 web profile ==="
+echo "  插件单元: $DEST/plugins/app（$(cat "$DEST/plugins/.installed-version" 2>/dev/null | grep -o '"version": *"[^"]*"' | head -1 | cut -d'"' -f4)）"
+echo "  本体单元: $DEST/app（$(cat "$DEST/.installed-version" 2>/dev/null | grep -o '"version": *"[^"]*"' | head -1 | cut -d'"' -f4)）"
 MAN="$HOME_DIR/profiles/web/package.json"
 if [ -f "$MAN" ]; then
   echo "  profile manifest: $MAN"

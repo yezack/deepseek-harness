@@ -5,16 +5,37 @@
 ================================================================
 
 包内容
-  install.sh     安装脚本（需 root）
-  node.zip       Node.js v22.23.2 linux-x64
-  app.zip        DeepSeek Harness + 全部依赖（约 1.3GB 解压后）
-  browser/       （可选）org.deepin.browser 升级 deb，见"系统浏览器升级"
-  enable-lan.sh  局域网访问脚本（root，加 DNAT 转发），见 remote-mobile 一节
-  doctor.sh      部署自检（glibc/原生模块/插件版本/浏览器/端口/配置）
-  collect-logs.sh 一键打包诊断信息
+  install.sh          安装本体（需 root）
+  install-plugins.sh  安装/升级插件单元（需 root）
+  node.zip            Node.js v22.23.2 linux-x64
+  body.zip            DeepSeek Harness 本体 + 全部依赖树
+  plugins.zip         第三方插件 + 它们自己的第三方依赖
+  VERSION             整体版本（旧客户端兼容）
+  VERSION-BODY        本体单元版本
+  VERSION-PLUGINS     插件单元版本
+  browser/            （可选）org.deepin.browser 升级 deb，见"系统浏览器升级"
+  enable-lan.sh       局域网访问脚本（root，加 DNAT 转发），见 remote-mobile 一节
+  doctor.sh           部署自检（glibc/原生模块/插件版本/浏览器/端口/配置）
+  collect-logs.sh     一键打包诊断信息
   maintain-profile.mjs 启动时维护 cordis.patch.yml（删孤儿行、整理标记块、YAML 预检）
-  tools/pnpm-*.tgz （可选）内置 pnpm，供 plugin-manager 使用
+  tools/pnpm-*.tgz    （可选）内置 pnpm，供 plugin-manager 使用
   tools/glibc*.tar.gz （可选）项目级兼容运行时：新 glibc，供需要高版本 glibc 的插件
+
+本体与插件是两个独立单元
+  装到两个目录，各自升级、互不干扰：
+
+    /deepseek-harness/            本体：app/（dsh 官方包 + 依赖树）、node/、脚本
+    /deepseek-harness/plugins/app/ 插件：第三方插件 + 它们自己的依赖
+
+  这样插件升级只下载插件包（约 1/4 整包大小），本体升级也不会把插件一起重装。
+  profile（~/.dsh/profiles/web）里只放**指向插件目录的软链**，由 seed-profile.sh
+  维护；插件对宿主包的依赖由 dsh 的 profile 解析统一指回本体那一份，所以拆开后
+  仍然是单实例（不会出现两份 cordis / dsh-tools）。
+
+  三个分发包：
+    dsh-uos-offline.tar.gz          整包：新机器一次装完（本体 + 插件）
+    dsh-uos-body-<版本>.tar.gz      本体升级包（只含 body.zip；不碰插件目录）
+    dsh-uos-plugins-<版本>.tar.gz   插件升级包（只含 plugins.zip；不碰本体）
 
 环境要求
   - UOS Desktop 20 (x86_64)，glibc 2.28 即可
@@ -61,6 +82,13 @@
   sudo ./install.sh
   自定义安装位置：
     sudo DSH_DEST=/opt/dsh ./install.sh
+  整包里带 plugins.zip 时 install.sh 会顺带把插件装到 /opt/dsh/plugins；
+  只有单体包时，先装本体，再单独装插件：
+
+    tar xzf dsh-uos-plugins-<版本>.tar.gz
+    cd package && sudo DSH_DEST=/opt/dsh ./install-plugins.sh
+
+  只想装本体（不要预装插件）时，可用不含 plugins.zip 的 body 包安装。
 
 系统浏览器升级（可选）
   包内若带 browser/org.deepin.browser_*_amd64.deb，安装脚本会先检测系统自带
@@ -116,10 +144,25 @@
   已知兼容基线"的证据。
 
 升级与备份
-  升级流程：停服务 → 把旧目录改名成 /deepseek-harness.bak-<时间戳> → 解压新包
-            → sudo ./install.sh → 启动。
+  两个单元分开升级（推荐，省下载量）：
+
+    # 只换插件（约 1/4 整包；本体与 profile 配置都不动）
+    tar xzf dsh-uos-plugins-<版本>.tar.gz
+    cd package && sudo ./install-plugins.sh --upgrade
+
+    # 只换本体（插件目录原样保留）
+    tar xzf dsh-uos-body-<版本>.tar.gz
+    cd package && sudo ./install.sh --upgrade
+
+    # 两样都换：用整包
+    tar xzf dsh-uos-offline.tar.gz
+    cd package && sudo ./install.sh --upgrade
+
+  桌面壳的「检查更新」读清单里的两个单元，只下载真正变化的那个。
   install.sh 启动时会清理旧备份，**只保留最近 2 份** /deepseek-harness.bak-*，
-  避免 / 被历史副本吃满。回滚：把当前目录改名，再把目标 .bak 改回来。
+  避免 / 被历史副本吃满。回滚：把当前目录改名，再把目标 .bak 改回来
+  （插件目录在 /deepseek-harness/plugins 里，随整目录一起回滚；单独回滚插件时
+  把 plugins 目录换回旧的一份即可）。
 
 离线边界（重要）
   - dshmarket 的"从市场安装新插件/检查更新"需要 npm registry，离线不可用；
@@ -375,17 +418,21 @@
   注意 /var/tmp 可能被系统清理；若 node 丢失，重新执行 sudo ./install.sh 即可。
 
 安装后的目录
-  /deepseek-harness/app                    应用与全部依赖（1.3GB）
+  /deepseek-harness/app                    本体：dsh 与全部官方依赖
+  /deepseek-harness/plugins/app            插件单元：第三方插件与它们的依赖
+  /deepseek-harness/plugins/.installed-version  插件单元版本
+  /deepseek-harness/.installed-version     本体单元版本
   /deepseek-harness/start-web.sh           启动脚本
+  /deepseek-harness/install-plugins.sh     插件安装/升级入口
   /deepseek-harness/seed-profile.sh        预置 web profile（安装时调用；可手动重跑）
   /deepseek-harness/maintain-profile.mjs   profile 维护（孤儿行/标记块/YAML 预检）
   /deepseek-harness/doctor.sh              部署自检
   /deepseek-harness/collect-logs.sh        诊断信息打包
-  /deepseek-harness/uninstall.sh           卸载脚本
+  /deepseek-harness/uninstall.sh           卸载脚本（本体与插件一起删）
   /deepseek-harness/enable-lan.sh          局域网访问（DNAT 转发，需 root）
   /var/tmp/dsh-node/              Node 运行时（白名单路径，含内置 pnpm）
   /var/tmp/dsh-native-cache/      原生模块缓存（白名单路径）
-  ~/.dsh/                         DSH_HOME（会话与设置）
+  ~/.dsh/                         DSH_HOME（会话与设置；profile 里只有插件软链）
 
 卸载
   /deepseek-harness/uninstall.sh
@@ -411,8 +458,23 @@
   默认更新服务器（可在安装时用 DSH_UPDATE_URL 覆盖，或改 /deepseek-harness/update.json）:
       http://autoupdate.kxzd.sjq.sh/deepseek_harness/latest.json
 
-  服务端只需两个静态文件：
-      latest.json            { version, dshVersion, sha256, size, url, publishedAt, minVersion, notes }
-      dsh-uos-offline.tar.gz 包本体（url 用相对名）
-  升级过程：下载 → sha256+大小校验 → 备份当前安装 → install.sh --upgrade → 自动重启；
-  失败自动回滚到备份。
+  服务端放静态文件：latest.json + 三个包（url 都是相对名）：
+
+      latest.json                    两个单元的清单（见下）
+      dsh-uos-offline.tar.gz         整包（老客户端按它整体升级）
+      dsh-uos-body-<版本>.tar.gz     本体升级包
+      dsh-uos-plugins-<版本>.tar.gz  插件升级包
+
+      latest.json 结构：
+        {
+          "version": "…", "dshVersion": "…",           ← 老客户端兼容字段（= 整包）
+          "sha256": "…", "size": …, "url": "dsh-uos-offline.tar.gz",
+          "publishedAt": "…", "minVersion": "", "notes": "",
+          "units": {
+            "body":    { "version": "…", "sha256": "…", "size": …, "url": "…", "minVersion": "" },
+            "plugins": { "version": "…", "sha256": "…", "size": …, "url": "…", "minVersion": "" }
+          }
+        }
+  升级过程：按单元下载 → sha256+大小校验 → 安装（本体用 install.sh --upgrade，
+  它不碰插件目录；插件用 install-plugins.sh --upgrade，它不碰本体）→ 自动重启；
+  失败自动回滚到备份。只改插件时可以只发插件包，客户端就只下那一个。
