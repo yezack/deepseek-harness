@@ -19,6 +19,7 @@
 #   sudo ./installer.sh upgrade [all|<组件>...]  按清单升级版本不同的组件
 #   sudo ./installer.sh remove <插件>...         卸载插件
 #   sudo ./installer.sh seed                     只重播 profile
+#   sudo ./installer.sh rollback [<generation>]     回退到上一代（用 .bak-<gen> 备份）
 #   ./installer.sh status [--json]               本机已装组件 vs 清单
 #   ./installer.sh list                          清单内容
 #   ./installer.sh verify                        自检（组件目录/软链/宿主包链接）
@@ -302,6 +303,115 @@ fs.writeFileSync(file, JSON.stringify(state, null, 2) + '\n')
 JSEOF
 }
 
+# ---------- 事务：generation / journal / 备份 ----------
+# 目录布局：$DEST/.state/generation（当前代）、$DEST/.state/journal（进行中的事务）、
+# 备份为 <目标目录>.bak-<gen>。规则：
+#   * 升级前把目标目录整体挪到 .bak-<gen>，组件安装脚本随后创建新目录；
+#   * 任一组件失败 → 按 journal 逆序恢复，state 不变；
+#   * 全部成功 → generation+1、journal 打 COMMIT 并删除、只保留最近 2 代备份；
+#   * 中途被打断（断电/kill）→ 下次 apply 看到未完成 journal 会提示并复用同一代备份继续。
+STATE_DIR="$DEST/.state"
+GEN_FILE="$STATE_DIR/generation"
+JOURNAL_FILE="$STATE_DIR/journal"
+TXN_ID=""
+
+current_gen() {
+  local gen=""
+  [ -f "$GEN_FILE" ] && gen="$(tr -dc '0-9' < "$GEN_FILE" 2>/dev/null)"
+  case "$gen" in ''|*[!0-9]*) gen=1 ;; esac
+  printf '%s' "$gen"
+}
+journal_begin() { # journal_begin <target-version>
+  mkdir -p "$STATE_DIR"
+  if [ -f "$JOURNAL_FILE" ] && grep -q '^BEGIN ' "$JOURNAL_FILE" 2>/dev/null && ! grep -q '^COMMIT ' "$JOURNAL_FILE" 2>/dev/null; then
+    TXN_ID="$(awk '/^BEGIN /{print $2; exit}' "$JOURNAL_FILE")"
+    log "发现未完成事务（$TXN_ID，目标 $(awk '/^BEGIN /{print $4; exit}' "$JOURNAL_FILE")），继续执行"
+    TXN_ARMED=1
+    trap 'if [ "${TXN_ARMED:-0}" = "1" ]; then journal_abort; fi' EXIT INT TERM
+    return 0
+  fi
+  TXN_ID="$(date +%Y%m%d%H%M%S)-$$"
+  printf 'BEGIN %s %s %s %s\n' "$TXN_ID" "$(current_gen)" "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$JOURNAL_FILE"
+  # 任何非正常退出（fail/exit/INT/TERM）都按 journal 回滚，避免留下半装状态。
+  TXN_ARMED=1
+  trap 'if [ "${TXN_ARMED:-0}" = "1" ]; then journal_abort; fi' EXIT INT TERM
+}
+journal_step() { # journal_step <name> <kind> <target> <backup|->
+  # 全制表符分隔，避免 awk 字段错位（回滚时按 $2..$5 读取）。
+  printf 'STEP\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$JOURNAL_FILE"
+}
+journal_commit() {
+  local gen
+  gen="$(( $(current_gen) + 1 ))"
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$gen" > "$GEN_FILE"
+  printf 'COMMIT %s %s\n' "$gen" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$JOURNAL_FILE"
+  rm -f "$JOURNAL_FILE"
+  TXN_ARMED=0
+  trap - EXIT INT TERM
+  prune_backups "$gen"
+  log "事务提交：generation $gen"
+}
+journal_abort() {
+  trap - EXIT INT TERM
+  TXN_ARMED=0
+  [ -f "$JOURNAL_FILE" ] || return 0
+  log "回滚本次事务 ..."
+  local restored=0 rows name kind target backup
+  rows="$(awk -F'\t' '$1=="STEP"{print $2"\t"$3"\t"$4"\t"$5}' "$JOURNAL_FILE" | tac)"
+  while IFS=$'\t' read -r name kind target backup; do
+    [ -n "$target" ] || continue
+    if [ "$backup" = "-" ]; then
+      # 本次事务新建的组件：直接移除
+      rm -rf "$target"
+    elif [ -d "$backup" ]; then
+      rm -rf "$target"
+      if mv "$backup" "$target"; then
+        restored=$((restored + 1))
+        if [ "$kind" = "body" ] && [ -f "$target/.dsh-body-version" ]; then
+          cp -f "$target/.dsh-body-version" "$DEST/.installed-version" 2>/dev/null || true
+          rm -f "$target/.dsh-body-version"
+        fi
+      else
+        echo "ERROR 无法恢复 $target" >&2
+      fi
+    fi
+  done <<< "$rows"
+  rm -f "$JOURNAL_FILE"
+  state_rebuild
+  log "回滚完成（恢复 $restored 个组件）"
+}
+prune_backups() { # 只保留最近两代备份
+  local gen="$1" keep="$(( $1 - 1 ))"
+  find "$DEST" -maxdepth 3 -type d -name "*.bak-*" 2>/dev/null | while IFS= read -r path; do
+    local bakgen
+    bakgen="${path##*.bak-}"
+    case "$bakgen" in ''|*[!0-9]*) continue ;; esac
+    [ "$bakgen" -lt "$keep" ] && rm -rf "$path"
+  done
+}
+component_target() { # component_target <name> <kind>
+  if [ "$2" = "body" ]; then printf '%s' "$DEST/app"; else printf '%s' "$DEST/plugins/$1"; fi
+}
+backup_target() { # backup_target <target> <gen>；目标不存在返回 "-"；已有同代备份则复用
+  local target="$1" gen="$2" backup
+  [ -e "$target" ] || { printf '%s' '-'; return 0; }
+  backup="${target}.bak-${gen}"
+  if [ -d "$backup" ]; then printf '%s' "$backup"; return 0; fi
+  rm -rf "$backup"
+  mv "$target" "$backup" || fail "无法备份 $target"
+  printf '%s' "$backup"
+}
+state_rebuild() {
+  local rows name kind ver
+  INSTALLED_SCAN=""
+  rm -f "$STATE_FILE"
+  rows="$(scan_installed)"
+  while IFS=$'\t' read -r name kind ver _rest; do
+    [ -n "$name" ] || continue
+    state_write "$name" "$kind" "$ver" "" ""
+  done <<< "$rows"
+}
 # 清单读取：有 node 用 node；全新安装时本机还没有 node（本体组件尚未解包），退到 python3。
 json_query() { # json_query <file> count | field <index> <name> | version
   local file="$1" op="$2"
@@ -394,6 +504,17 @@ install_component() { # install_component <index> [upgrade]
   echo "PHASE 安装 $name"
   local args=("--component" "$comp")
   [ "$mode" = "upgrade" ] && args+=("--upgrade")
+  # 事务备份：目标已存在就先挪到 .bak-<gen>；本次新建的目录记 backup=-，回滚时删除。
+  local txn_target txn_backup="-"
+  txn_target="$(component_target "$name" "$kind")"
+  if [ -e "$txn_target" ]; then
+    txn_backup="$(backup_target "$txn_target" "$(current_gen)")"
+  fi
+  # 本体的版本标记在 $DEST/.installed-version（目录外），复制一份进备份，回滚时还原。
+  if [ "$kind" = "body" ] && [ -d "$txn_backup" ] && [ -f "$DEST/.installed-version" ]; then
+    cp -f "$DEST/.installed-version" "$txn_backup/.dsh-body-version" 2>/dev/null || true
+  fi
+  journal_step "$name" "$kind" "$txn_target" "$txn_backup"
   # 每个组件的安装脚本自己会动 $DEST；插件安装包不带 profile 播种（统一由 installer 做）。
   # 路径类变量按需透传，支持沙箱 DEST 与自定义 electron/glibc 目录。
   local comp_env=(DSH_DEST="$DEST" DSH_NODE_DIR="$INSTALL_NODE_DIR" DSH_SKIP_SEED=1 DSH_USER="${DSH_USER:-${SUDO_USER:-}}")
@@ -404,6 +525,8 @@ install_component() { # install_component <index> [upgrade]
   done
   if ! env "${comp_env[@]}" bash "$stage/package/install.sh" "${args[@]}"; then
     rm -rf "$stage"
+    # 单组件失败先自我恢复，整体事务再由 journal_abort 逆序回滚。
+    if [ -d "$txn_backup" ]; then rm -rf "$txn_target"; mv "$txn_backup" "$txn_target"; fi
     echo "ERROR $name 安装失败"
     return 1
   fi
@@ -557,6 +680,7 @@ cmd_apply() {
 cmd_install() {
   need_root
   acquire_lock
+  journal_begin "$MANIFEST_VERSION"
   local count i targets=("${ARGS[@]}")
   count="$(component_count)"
   if [ "${#targets[@]}" -eq 0 ]; then targets=("all"); fi
@@ -590,14 +714,16 @@ cmd_install() {
     i=$((i + 1))
   done
   seed_profile || failed=$((failed + 1))
-  [ "$failed" -eq 0 ] || { echo "ERROR 有 $failed 个步骤失败"; return 1; }
+  if [ "$failed" -ne 0 ]; then journal_abort; echo "ERROR 有 $failed 个步骤失败（已回滚）"; return 1; fi
   persist_manifest
+  journal_commit
   echo "RESULT done"
 }
 
 cmd_upgrade() {
   need_root
   acquire_lock
+  journal_begin "$MANIFEST_VERSION"
   local count i targets=("${ARGS[@]}")
   count="$(component_count)"
   [ "${#targets[@]}" -eq 0 ] && targets=("all")
@@ -618,8 +744,9 @@ cmd_upgrade() {
     i=$((i + 1))
   done
   seed_profile || failed=$((failed + 1))
-  [ "$failed" -eq 0 ] || { echo "ERROR 有 $failed 个组件升级失败"; return 1; }
+  if [ "$failed" -ne 0 ]; then journal_abort; echo "ERROR 有 $failed 个组件升级失败（已回滚）"; return 1; fi
   persist_manifest
+  journal_commit
   echo "RESULT done"
 }
 
@@ -669,6 +796,40 @@ cmd_seed() {
   seed_profile
 }
 
+cmd_rollback() { # rollback [<generation>]
+  need_root
+  acquire_lock
+  local want="${ARGS[0]:-}" gens backup target restored=0
+  gens="$(find "$DEST" -maxdepth 3 -type d -name '*.bak-*' 2>/dev/null \
+    | sed -E 's/.*\.bak-([0-9]+)$/\1/' | sort -n -u)"
+  [ -n "$gens" ] || fail "没有可回滚的备份（无带代号的升级记录）"
+  if [ -n "$want" ]; then
+    printf '%s\n' "$gens" | grep -qx "$want" || fail "没有第 $want 代备份（可用：$(printf '%s ' $gens)）"
+  else
+    want="$(printf '%s\n' "$gens" | tail -1)"
+  fi
+  log "回滚到 generation $want ..."
+  while IFS= read -r backup; do
+    [ -n "$backup" ] || continue
+    target="${backup%.bak-$want}"
+    rm -rf "$target"
+    if mv "$backup" "$target"; then
+      restored=$((restored + 1)); log "恢复 $target"
+      if [ -f "$target/.dsh-body-version" ]; then
+        cp -f "$target/.dsh-body-version" "$DEST/.installed-version" 2>/dev/null || true
+        rm -f "$target/.dsh-body-version"
+      fi
+    else
+      echo "ERROR 无法恢复 $target" >&2
+    fi
+  done <<< "$(find "$DEST" -maxdepth 3 -type d -name "*.bak-$want" 2>/dev/null)"
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$want" > "$GEN_FILE"
+  seed_profile 2>/dev/null || true
+  state_rebuild
+  echo "RESULT rollback generation $want restored=$restored"
+}
+
 cmd_verify() {
   local problems=0
   check() { if eval "$1"; then log "OK   $2"; else log "FAIL $2"; problems=$((problems + 1)); fi; }
@@ -708,6 +869,7 @@ case "$COMMAND" in
   install) cmd_install ;;
   upgrade) cmd_upgrade ;;
   apply) cmd_apply ;;
+  rollback) cmd_rollback ;;
   remove) cmd_remove ;;
   seed) cmd_seed ;;
   verify) cmd_verify ;;
