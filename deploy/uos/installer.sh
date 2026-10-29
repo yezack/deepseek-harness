@@ -4,7 +4,7 @@
 # 分发目录里只有组件包，没有整包：
 #
 #   installer.sh            本脚本
-#   manifest.json           组件清单（本体 1 个 + 每个插件 1 个）
+#   distribution.json       组件清单（format 3：主体 + 插件；manifest.json 为兼容别名）
 #   VERSION                 本次分发版本
 #   components/             各组件 tar.gz
 #
@@ -118,10 +118,10 @@ acquire_lock() {
 }
 
 # ---------- 分发目录自动探查 ----------
-# 不要求 --dist：按「脚本所在目录 → $DEST（安装后自带 installer）→ 当前目录」找 manifest.json。
+# 不要求 --dist：按「脚本所在目录 → $DEST（安装后自带 installer）→ 当前目录」找清单。
 if [ -z "$DIST" ]; then
   for candidate in "$HERE" "$DEST" "$(pwd)"; do
-    [ -f "$candidate/manifest.json" ] && { DIST="$candidate"; break; }
+    { [ -f "$candidate/distribution.json" ] || [ -f "$candidate/manifest.json" ]; } && { DIST="$candidate"; break; }
   done
   [ -n "$DIST" ] || DIST="$HERE"
 fi
@@ -129,7 +129,11 @@ fi
 # ---------- 清单获取 ----------
 WORK="$DIST"
 
-MANIFEST="$WORK/manifest.json"
+if [ -f "$WORK/distribution.json" ]; then
+  MANIFEST="$WORK/distribution.json"
+else
+  MANIFEST="$WORK/manifest.json"
+fi
 [ -f "$MANIFEST" ] || fail "找不到清单：$MANIFEST（用 --dist 指定离线分发目录）"
 NODE_BIN="$INSTALL_NODE_DIR/bin/node"
 [ -x "$NODE_BIN" ] || NODE_BIN="$DEST/node/bin/node"
@@ -562,10 +566,13 @@ seed_profile() {
 
 # 清单留存：装完后把 $WORK/manifest.json 复制到 $DEST，之后的 status/verify 不再依赖介质。
 persist_manifest() {
-  [ -f "$WORK/manifest.json" ] || return 0
-  mkdir -p "$DEST"
-  cp -f "$WORK/manifest.json" "$DEST/manifest.json" 2>/dev/null || true
-  chmod 644 "$DEST/manifest.json" 2>/dev/null || true
+  local name
+  for name in distribution.json manifest.json; do
+    [ -f "$WORK/$name" ] || continue
+    mkdir -p "$DEST"
+    cp -f "$WORK/$name" "$DEST/$name" 2>/dev/null || true
+    chmod 644 "$DEST/$name" 2>/dev/null || true
+  done
 }
 
 # ---------- 命令 ----------
@@ -623,6 +630,49 @@ JSEOF
   cmd_list
 }
 
+# ---------- 兼容性校验 ----------
+# 清单里每个组件的 requires 必须在本次分发内可满足：
+#   requires.dsh  插件构建/验证时的 dsh 版本 → 只比较 major.minor（补丁级漂移容忍）
+#   requires.core tools/scripts/shell 依赖的 core 版本 → 必须完全一致
+requires_check() {
+  [ -f "$MANIFEST" ] || return 0
+  local out
+  out="$(python3 - "$MANIFEST" <<'PYEOF'
+import json, sys
+
+manifest = json.load(open(sys.argv[1]))
+target = manifest.get('dshVersion') or ''
+components = manifest.get('components') or []
+core = next((c for c in components if c.get('kind') == 'core'), {})
+core_version = core.get('version') or ''
+
+
+def major_minor(version):
+    return '.'.join(str(version).split('.')[:2])
+
+
+conflicts = []
+for component in components:
+    requires = component.get('requires') or {}
+    want_dsh = requires.get('dsh')
+    if want_dsh and major_minor(target) != major_minor(want_dsh):
+        conflicts.append('%s 需要 dsh %s，本次分发是 %s' % (component.get('name'), want_dsh, target))
+    want_core = requires.get('core')
+    if want_core and want_core != core_version:
+        conflicts.append('%s 需要 core %s，本次分发是 %s' % (component.get('name'), want_core, core_version))
+
+for conflict in conflicts:
+    print('  - ' + conflict)
+sys.exit(1 if conflicts else 0)
+PYEOF
+  )" || {
+    echo "ERROR 兼容性校验失败（分发内部不一致）："
+    printf '%s\n' "$out"
+    return 1
+  }
+  return 0
+}
+
 # ---------- 计划 ----------
 print_plan() {
   local targets=("${ARGS[@]}")
@@ -654,6 +704,7 @@ print_plan() {
 # apply：自动判定全新安装或升级（离线介质入口 install.sh 调它）。
 cmd_apply() {
   print_plan
+  requires_check || return 1
   if [ "$DRY_RUN" = "1" ]; then
     echo "RESULT plan-only"
     return 0
@@ -670,6 +721,7 @@ cmd_apply() {
 cmd_install() {
   need_root
   acquire_lock
+  requires_check || return 1
   journal_begin "$MANIFEST_VERSION"
   local count i targets=("${ARGS[@]}")
   count="$(component_count)"
@@ -713,6 +765,7 @@ cmd_install() {
 cmd_upgrade() {
   need_root
   acquire_lock
+  requires_check || return 1
   journal_begin "$MANIFEST_VERSION"
   local count i targets=("${ARGS[@]}")
   count="$(component_count)"

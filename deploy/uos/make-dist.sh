@@ -63,7 +63,7 @@ SCRIPTS_VERSION="$(cd "$SCRIPTS_DIR" && find . -type f -print0 | sort -z | xargs
 
 # makeComponent <name> <kind> <version> <order> <payload-root> <payload-subdir>
 makeComponent() {
-  local name="$1" kind="$2" version="$3" order="$4" payloadRoot="$5" subdir="$6" slug work tarfile
+  local name="$1" kind="$2" version="$3" order="$4" payloadRoot="$5" subdir="$6" requires="${7:-}" slug work tarfile
   slug="$(slugOf "$name")"
   work="$STAGE/comp-$slug"
   rm -rf "$work"
@@ -74,25 +74,26 @@ makeComponent() {
   ln -s "$payloadRoot" "$work/package/payload/$subdir"
   # core 组件同时携带 Node 运行时（脚本/壳/工具在各自组件里）。
   [ "$kind" = "core" ] && ln -s "$BUILD/node" "$work/package/payload/node"
-  "$BUILD/node/bin/node" - "$work/package/component.json" "$name" "$kind" "$version" "$DSH_VER" "$order" <<'JSEOF'
+  "$BUILD/node/bin/node" - "$work/package/component.json" "$name" "$kind" "$version" "$DSH_VER" "$order" "$requires" <<'JSEOF'
 const fs = require('fs')
-const [file, name, kind, version, dshVersion, order] = process.argv.slice(2)
+const [file, name, kind, version, dshVersion, order, requires] = process.argv.slice(2)
 fs.writeFileSync(file, JSON.stringify({
   name, kind, version, dshVersion, order: Number(order),
   policy: { defaultEnabled: true, enforced: false },
+  requires: requires ? JSON.parse(requires) : {},
   installedBy: 'installer',
 }, null, 2) + '\n')
 JSEOF
   tarfile="$DIST/components/$slug-$version.tar.gz"
   tar czhf "$tarfile" -C "$work" package/component.json package/install.sh package/payload
-  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$kind" "$version" "$order" "components/$(basename "$tarfile")" >> "$STAGE/components.list"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$kind" "$version" "$order" "components/$(basename "$tarfile")" "$requires" >> "$STAGE/components.list"
   echo "  组件: $(basename "$tarfile") ($(du -h "$tarfile" | cut -f1))"
 }
 
-makeComponent "@deepseek-ai/dsh-core"    core    "$PKG_VERSION"     0  "$APP"                    app
-makeComponent "@deepseek-ai/dsh-scripts" scripts "$SCRIPTS_VERSION" 2 "$SCRIPTS_DIR" scripts
-[ -d "$BUILD/desktop" ] && makeComponent "@deepseek-ai/dsh-shell" shell "$PKG_VERSION" 3 "$BUILD/desktop" desktop
-[ -d "$BUILD/tools" ]   && makeComponent "@deepseek-ai/dsh-tools" tools "$PKG_VERSION" 1 "$BUILD/tools"   tools
+makeComponent "@deepseek-ai/dsh-core"    core    "$PKG_VERSION"     0  "$APP"                    app     '{}'
+makeComponent "@deepseek-ai/dsh-scripts" scripts "$SCRIPTS_VERSION" 2 "$SCRIPTS_DIR" scripts "{\"core\":\"$PKG_VERSION\"}"
+[ -d "$BUILD/desktop" ] && makeComponent "@deepseek-ai/dsh-shell" shell "$PKG_VERSION" 3 "$BUILD/desktop" desktop "{\"core\":\"$PKG_VERSION\"}"
+[ -d "$BUILD/tools" ]   && makeComponent "@deepseek-ai/dsh-tools" tools "$PKG_VERSION" 1 "$BUILD/tools"   tools "{\"core\":\"$PKG_VERSION\"}"
 
 # ---------- 插件组件 ----------
 echo "=== 2. 插件组件 ==="
@@ -171,11 +172,12 @@ const components = []
 
 for (const line of fs.readFileSync(componentsList, 'utf8').split('\n')) {
   if (line === '') continue
-  const [name, kind, entryVersion, order, file] = line.split('\t')
+  const [name, kind, entryVersion, order, file, requiresText] = line.split('\t')
   const abs = path.join(dist, file)
   components.push({
     name, kind, version: entryVersion, order: Number(order),
     policy: { defaultEnabled: true, enforced: false },
+    requires: requiresText ? JSON.parse(requiresText) : {},
     file, sha256: sha256(abs), size: fs.statSync(abs).size,
   })
 }
@@ -191,6 +193,8 @@ if (fs.existsSync(pluginsList)) {
     components.push({
       name, kind: 'plugin', version: pluginVersion, entryId, order: Number(order),
       policy: { defaultEnabled: disabled !== '1', enforced: alwaysLast === '1' },
+      // 插件构建/验证时对应的 dsh 版本：安装器按 major.minor 做兼容校验。
+      requires: { dsh: dshVersion },
       file, sha256: sha256(abs), size: fs.statSync(abs).size,
     })
   }
@@ -206,7 +210,10 @@ const manifest = {
   installer: { version, file: 'installer.sh' },
   components,
 }
-fs.writeFileSync(path.join(dist, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
+const serialized = JSON.stringify(manifest, null, 2) + '\n'
+// 新名字 distribution.json 为规范；manifest.json 保留给旧版 installer / 旧脚本探测。
+fs.writeFileSync(path.join(dist, 'distribution.json'), serialized)
+fs.writeFileSync(path.join(dist, 'manifest.json'), serialized)
 const body = components.filter((component) => component.kind !== 'plugin')
 const plugins = components.filter((component) => component.kind === 'plugin')
 console.log(`  清单: ${components.length} 个组件（主体 ${body.length} + 插件 ${plugins.length}）`)
@@ -231,7 +238,7 @@ const files = fs.readdirSync(path.join(dist, 'components'))
   .filter((file) => file.endsWith('.tar.gz'))
   .sort()
   .map((file) => `components/${file}`)
-files.push('manifest.json', 'VERSION')
+files.push('distribution.json', 'VERSION')
 fs.writeFileSync(path.join(dist, 'SHA256SUMS'), files.map((rel) => `${sha(path.join(dist, rel))}  ${rel}`).join('\n') + '\n')
 console.log(`  SHA256SUMS: ${files.length} 项`)
 JSEOF

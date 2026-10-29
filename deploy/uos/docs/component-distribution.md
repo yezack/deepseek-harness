@@ -49,7 +49,7 @@ package/payload/...
 | 字段 | 含义 |
 |---|---|
 | `name` / `kind` / `version` | 组件身份：`kind ∈ core, shell, scripts, tools, plugin` |
-| `requires` | `{ dsh?: range, body?: range }`，安装期校验 |
+| `requires` | `{ dsh?: "x.y.z", core?: "<core 版本>" }`：安装期校验（dsh 比 major.minor，core 精确匹配） |
 | `policy` | `{ defaultEnabled: bool, enforced: bool }`，取代旧的 `disabled`/`alwaysLast` 兼任 |
 | `layerOrder` / `last` | 只影响 profile 里的层序，不影响启用策略 |
 
@@ -71,7 +71,7 @@ package/payload/...
 
 ```jsonc
 {
-  "format": 3,
+  "format": 3,                         // 清单文件：distribution.json（manifest.json 为兼容别名）
   "distribution": {
     "version": "20261029.0100",          // 单调构建版本（YYYYMMDD.HHMM）
     "dshVersion": "0.2.1-rc.4",
@@ -82,7 +82,7 @@ package/payload/...
   "components": [
     {
       "name": "@yezack/dsh-remote-mobile", "kind": "plugin", "version": "1.10.0",
-      "requires": { "dsh": ">=0.2.1-rc.2 <0.3", "body": ">=20261029.0000" },
+      "requires": { "dsh": "0.2.1-rc.4", "core": "20261029.0430" },
       "policy": { "defaultEnabled": true, "enforced": false },
       "layerOrder": 130, "last": false,
       "file": "components/yezack-dsh-remote-mobile-1.10.0.tar.gz",
@@ -104,7 +104,7 @@ apply --dist <介质目录>
   1. flock $DSH_DEST/.installer.lock          # 防并发（壳与人工同时操作）
   2. 介质校验（SHA256SUMS）+ 清单格式与 installer.minSupported 检查
   3. plan = diff(state, distribution)         # install/upgrade/replace/remove
-  4. 兼容解析（requires.dsh/body、lockstep）+ 磁盘预检（剩余空间 ≥ 计划写入 × 1.2）
+  4. 兼容校验（`requires.dsh` 比 major.minor、`requires.core` 精确匹配）+ 磁盘预检
   5. 打印计划；--dry-run 在此返回
   6. 写 journal（txn id、plan、起始 generation）
   7. 逐组件：解到 <target>.new → rename 换入（旧目录留 .bak-<gen>）→ journal 记 done

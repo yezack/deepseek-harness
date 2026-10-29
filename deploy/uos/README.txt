@@ -19,7 +19,7 @@ dsh 0.2.1-rc.4 · Node.js 22.23.2 (linux-x64) · Electron 桌面壳
 ================================================================
   install.sh          安装入口：先做介质自检（SHA256SUMS），再交给 installer
   installer.sh        统一管理：apply / status / verify / rollback / remove / seed / doctor
-  manifest.json       组件清单（format 3：组件版本、sha256、policy、requires）
+  distribution.json   组件清单（format 3：版本、sha256、policy、requires；manifest.json 为兼容别名）
   SHA256SUMS          介质完整性清单（组件 + 清单 + VERSION）
   VERSION             分发版本（YYYYMMDD.HHMM）
   components/         每个组件一个 tar.gz（本体 + 每个插件各一个）
