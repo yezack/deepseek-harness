@@ -214,14 +214,16 @@ installer 直接 `ERROR` 并提示用新介质重装（不做自动迁移）。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | install.sh 介质自检（SHA256SUMS）+ installer apply/--dry-run + flock + 磁盘/误装防护 | 已完成 |
-| P1a | generation + journal + 备份/回滚 + resume + ollback 命令 | 已完成 |
-| P1b | policy 字段 + 两段式 managed 块（DEFAULT-OFF 置顶、ENFORCED 置底、用户区只读） | 已完成 |
-| P1c | 纯离线：删 --server/curl；桌面壳删 updater/preload/forced/progress 与"检查更新" | 已完成 |
-| P2 | body 拆成 core(order 0) / 	ools(1) / scripts(2) / shell(3)；scripts 版本取脚本内容哈希，只有脚本变化才重装；installer 以 installed.json 为权威状态并清理清单外条目 | 已完成 |
-| P3 | equires（body↔插件兼容矩阵）、清单文件改名 distribution.json | 待做 |
+| P0 | `install.sh` 介质自检（SHA256SUMS）+ `installer apply`/`--dry-run` + flock | 已完成 |
+| P1a | generation + journal + 备份/回滚 + resume + `rollback` 命令 | 已完成 |
+| P1b | `policy` 字段 + 两段式 managed 块（DEFAULT-OFF 置顶、ENFORCED 置底、用户区只读） | 已完成 |
+| P1c | 纯离线：删 `--server`/`curl`；桌面壳删 updater/preload/forced/progress 与「检查更新」 | 已完成 |
+| P2 | body 拆成 `core`(0) / `tools`(1) / `scripts`(2) / `shell`(3)；scripts 版本取内容哈希；installer 以 installed.json 为权威并清理清单外条目 | 已完成 |
+| P3 | `requires` 安装期兼容校验（dsh 比 major.minor、core 精确匹配）；清单改名 `distribution.json`（`manifest.json` 兼容别名） | 已完成（suma 回归：冲突写盘前拒绝、升级 generation 9→10） |
 
 组件版本约定：
-  - core / 	ools / shell = 分发版本（重建即刷新，下载主体仍是大头）；
-  - scripts = 脚本内容哈希（前 12 位）——只改脚本时不重下本体；
+
+  - `core` / `tools` / `shell` = 分发版本（重建即刷新）；
+  - `scripts` = 脚本内容哈希（前 12 位），只改脚本时不重下本体；
   - 插件 = 包自身 semver。
+
