@@ -35,6 +35,11 @@ const BLOCKS = [
     owned: new Set((disabledCsv ?? '').split(',').filter((item) => item !== '')),
   },
   {
+    begin: '# >>> dsh-offline: enforced plugins',
+    end: '# <<< dsh-offline: enforced plugins',
+    owned: new Set((forcedCsv ?? '').split(',').filter((item) => item !== '')),
+  },
+  {
     begin: '# >>> dsh-offline: render browser',
     end: '# <<< dsh-offline: render browser',
     owned: new Set(['univer']),
@@ -223,25 +228,20 @@ if (knownIds !== null && knownIds.size > 0) {
   console.log('[maintain-profile] 无法枚举已知 entry（bundle patch 扫描失败），跳过孤儿行检查')
 }
 
-// 【强制启用】某些 bundle 不允许被 profile 关掉（例如企业管控插件）。
-// 做法：把这些 id 的行里的 `disabled:` 去掉；如果去掉后整行只剩 `- id: x`，
-// 说明这行唯一目的就是禁用，直接删掉。
+// 【强制启用】不再改动用户区内容：seed-profile.sh 会在文件末尾写 ENFORCED 块
+// （disabled: false），按文件顺序覆盖用户区的禁用行。这里只提示冲突，不删行。
 const forced = new Set((forcedCsv ?? '').split(',').filter((item) => item !== ''))
 if (forced.size > 0) {
   const rows = partition(0, lines.length)
-  let forcedCount = 0
-  for (const row of [...rows].reverse()) {
+  const conflicts = new Set()
+  for (const row of rows) {
     const id = rowIdOf(lines[row.start] ?? '')
     if (id === null || !forced.has(id)) continue
-    const body = lines.slice(row.start, row.end)
-    const kept = body.filter((line, index) => index === 0 || !/^\s*disabled:\s*(?:true|false)\s*$/u.test(line))
-    const hasOtherKeys = kept.some((line, index) => index > 0 && /^\s+\S/u.test(line))
-    if (hasOtherKeys) lines.splice(row.start, row.end - row.start, ...kept)
-    else lines.splice(row.start, row.end - row.start)
-    forcedCount += 1
+    const body = lines.slice(row.start, row.end).join('\n')
+    if (/^\s*disabled:\s*true\s*$/mu.test(body)) conflicts.add(id)
   }
-  if (forcedCount > 0) {
-    console.log(`[maintain-profile] 强制启用 ${forcedCount} 行（${[...forced].join(',')}），已移除其 disabled 设置`)
+  if (conflicts.size > 0) {
+    console.log(`[maintain-profile] 用户区有禁用 ${[...conflicts].join(',')} 的配置，但 ENFORCED 块会覆盖（保持启用）`)
   }
 }
 

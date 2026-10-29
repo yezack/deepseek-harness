@@ -58,8 +58,8 @@ function walk(dir) {
       version: meta.version,
       entryId: typeof meta.entryId === 'string' && meta.entryId !== '' ? meta.entryId : meta.name,
       order: Number.isFinite(meta.order) ? meta.order : 100,
-      alwaysLast: meta.alwaysLast === true,
-      disabled: meta.disabled === true,
+      alwaysLast: meta.alwaysLast === true || meta.policy?.enforced === true,
+      disabled: meta.disabled === true || meta.policy?.defaultEnabled === false,
       dir: full,
     })
   }
@@ -148,38 +148,61 @@ fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n')
 console.log(`[seed-profile] bundles: ${manifest.dsh.profile.bundles.length} 项（插件 ${rows.length} 个）`)
 JSEOF
 
-# ============ 3. cordis.patch.yml：默认禁用块 ============
+# ============ 3. cordis.patch.yml：两个 managed 块 ============
+# 文件顺序即优先级：DEFAULT-OFF 块放最前（操作员可在用户区覆盖），ENFORCED 块放最后
+# （操作员关不掉）。工具只改这两个块内的字节，用户区原样保留、不删不挪。
 PATCH="$PROFILE/cordis.patch.yml"
-BEGIN_MARK="# >>> dsh-offline: default-disabled plugins"
-END_MARK="# <<< dsh-offline: default-disabled plugins"
-COMPONENTS="$COMPONENTS" "$NODE_BIN" - "$PATCH" "$BEGIN_MARK" "$END_MARK" <<'JSEOF'
+OFF_BEGIN="# >>> dsh-offline: default-disabled plugins"
+OFF_END="# <<< dsh-offline: default-disabled plugins"
+ENF_BEGIN="# >>> dsh-offline: enforced plugins"
+ENF_END="# <<< dsh-offline: enforced plugins"
+COMPONENTS="$COMPONENTS" OFF_BEGIN="$OFF_BEGIN" OFF_END="$OFF_END" ENF_BEGIN="$ENF_BEGIN" ENF_END="$ENF_END" \
+  "$NODE_BIN" - "$PATCH" <<'JSEOF'
 const fs = require('node:fs')
 const path = require('node:path')
-const [file, beginMark, endMark] = process.argv.slice(2)
+const file = process.argv[2]
+const beginOff = process.env.OFF_BEGIN
+const endOff = process.env.OFF_END
+const beginEnf = process.env.ENF_BEGIN
+const endEnf = process.env.ENF_END
 const rows = (process.env.COMPONENTS ?? '').split('\n').filter((line) => line !== '').map((line) => {
   const [name, version, entryId, order, disabled, alwaysLast] = line.split('\t')
-  return { name, entryId, disabled: disabled === '1', alwaysLast: alwaysLast === '1' }
+  return { name, entryId, disabled: disabled === '1', enforced: alwaysLast === '1' }
 })
-// 默认禁用：组件自己声明 disabled，或（历史行为）dream-skin / dsh-market。
-// 这里写的是 bundle entry 的 id，不是包名，两者不一定相同。
-const disabled = rows.filter((row) => row.disabled).map((row) => row.entryId)
-const block = [
-  beginMark,
-  '# 由 seed-profile.sh 维护：列在这里的插件装好了但默认不启用。',
-  '# 需要时删掉整块（或其中一项）再重启即可。',
-  ...disabled.flatMap((id) => [`- id: ${id}`, '  disabled: true']),
-  endMark,
+// 块内写的是 bundle entry 的 id，不是包名，两者不一定相同。
+const offIds = rows.filter((row) => row.disabled && !row.enforced).map((row) => row.entryId)
+const enfIds = rows.filter((row) => row.enforced).map((row) => row.entryId)
+const offBlock = [
+  beginOff,
+  '# 由 seed-profile.sh 维护：默认安装后不启用（操作员可在用户区覆盖）',
+  ...offIds.flatMap((id) => [`- id: ${id}`, '  disabled: true']),
+  endOff,
 ].join('\n')
+const enfBlock = [
+  beginEnf,
+  '# 由 seed-profile.sh 维护：强制启用，操作员无法通过 profile 关闭',
+  ...enfIds.flatMap((id) => [`- id: ${id}`, '  disabled: false']),
+  endEnf,
+].join('\n')
+function stripBlock(text, begin, end) {
+  const start = text.indexOf(begin)
+  if (start === -1) return text
+  const stop = text.indexOf(end, start)
+  if (stop === -1) return text
+  return text.slice(0, start) + text.slice(stop + end.length)
+}
 let current = ''
 try { current = fs.readFileSync(file, 'utf8') } catch (error) { if (error.code !== 'ENOENT') throw error }
-const beginAt = current.indexOf(beginMark)
-const endAt = current.indexOf(endMark)
-const next = beginAt !== -1 && endAt > beginAt
-  ? current.slice(0, beginAt) + block + current.slice(endAt + endMark.length)
-  : (current.trimEnd() === '' ? block : current.trimEnd() + '\n\n' + block)
+const user = stripBlock(stripBlock(current, beginOff, endOff), beginEnf, endEnf).trim()
+const parts = []
+if (offIds.length > 0) parts.push(offBlock)
+if (user !== '') parts.push(user)
+if (enfIds.length > 0) parts.push(enfBlock)
+const next = parts.join('\n\n') + '\n'
 fs.mkdirSync(path.dirname(file), { recursive: true })
-fs.writeFileSync(file, next.trimEnd() + '\n')
-console.log(`[seed-profile] 默认禁用: ${disabled.length === 0 ? '（无）' : disabled.join(', ')}`)
+fs.writeFileSync(file, next)
+console.log(`[seed-profile] 默认禁用: ${offIds.length === 0 ? '（无）' : offIds.join(', ')}`)
+console.log(`[seed-profile] 强制启用: ${enfIds.length === 0 ? '（无）' : enfIds.join(', ')}`)
 JSEOF
 
 # ============ 4. webserver 通配绑定迁移（0.2.1 拒绝 0.0.0.0） ============

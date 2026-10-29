@@ -157,6 +157,15 @@ installer 直接 `ERROR` 并提示用新介质重装（不做自动迁移）。
 - `layerOrder` / `last` → 只决定 GENERATED 块内 bundles 顺序（ga-controller 排最后）。
 - 块外内容（操作员手写、历史遗留）一律保留；只提示可疑行，不自动删除。
 
+补充（实测确认的 DSH 语义）：
+
+- 用户区要**启用**一个默认关的插件，必须显式写 `disabled: false`；只写 `- id: x`（不带
+  `disabled`）不会覆盖 DEFAULT-OFF 块，插件仍然不加载。
+- `policy.enforced: true` 的插件由 ENFORCED 块（位于文件末尾）保证启用；用户在用户区
+  写 `disabled: true` 不会生效，`maintain-profile.mjs` 只打印冲突提示、不删除用户行。
+- `manifest.json` 已升到 format 3，每个组件带 `policy: { defaultEnabled, enforced }`，
+  `component.json` 同样写入 policy；旧 `disabled` / `alwaysLast` 字段保留兼容。
+
 ## 6. 兼容性与版本策略
 
 - 两层版本：`distribution.version`（整批）+ 组件自身 `version`（semver）。

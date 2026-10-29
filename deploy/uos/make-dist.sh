@@ -113,6 +113,7 @@ while IFS=$'\t' read -r name version entryId order disabled alwaysLast; do
 const fs = require('fs')
 const [file, name, version, dshVersion, entryId, order, disabled, alwaysLast] = process.argv.slice(2)
 const meta = { name, kind: 'plugin', version, dshVersion, entryId, order: Number(order) }
+  meta.policy = { defaultEnabled: disabled !== '1', enforced: alwaysLast === '1' }
 if (disabled === '1') meta.disabled = true
 if (alwaysLast === '1') meta.alwaysLast = true
 fs.writeFileSync(file, JSON.stringify(meta, null, 2) + '\n')
@@ -146,6 +147,7 @@ const plugins = files.filter((file) => !file.startsWith('dsh-body-'))
 const components = []
 const bodyVersion = version
 components.push({
+    policy: { defaultEnabled: true, enforced: false },
   name: '@deepseek-ai/dsh', kind: 'body', version: bodyVersion, order: 0,
   file: `components/${body}`,
   sha256: sha256(path.join(componentsDir, body)),
@@ -167,12 +169,13 @@ for (const [name, pluginVersion, entryId, order, disabled, alwaysLast] of rows) 
   }
   if (disabled === '1') entry.disabled = true
   if (alwaysLast === '1') entry.alwaysLast = true
+  entry.policy = { defaultEnabled: disabled !== '1', enforced: alwaysLast === '1' }
   components.push(entry)
   index += 1
 }
 components.sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
 const manifest = {
-  format: 2,
+  format: 3,
   generatedAt: new Date().toISOString(),
   version,
   dshVersion,
