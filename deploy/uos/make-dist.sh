@@ -44,37 +44,55 @@ mkdir -p "$STAGE/plugins"
 
 slugOf() { printf '%s' "$1" | sed 's/^@//; s#/#-#g'; }
 
-# ---------- 本体组件 ----------
-echo "=== 1. 本体组件 ==="
-BODY_VERSION="$PKG_VERSION"
-cp "$BUILD/component/body/install.sh" "$STAGE/body/package/install.sh"
-chmod 755 "$STAGE/body/package/install.sh"
-printf '%s\n' "$BODY_VERSION" > "$STAGE/body/package/payload/VERSION"
-mkdir -p "$STAGE/body/package/payload/scripts"
+# ---------- 主体组件：core / tools / scripts / shell ----------
+# 拆分目的：改一行脚本只发 scripts（几十 KB），不必重下 1.7GB 本体。
+# core/tools/shell 的版本跟随分发版本；scripts 的版本取脚本内容哈希，内容没变就不会重装。
+echo "=== 1. 主体组件（core/tools/scripts/shell）==="
+mkdir -p "$STAGE/components"
+: > "$STAGE/components.list"
+
+# scripts 版本 = 脚本内容哈希（前 12 位）：只有脚本真的变了，客户端才会重装这个组件。
+SCRIPTS_DIR="$STAGE/scripts-payload/scripts"
+mkdir -p "$SCRIPTS_DIR"
 for script in seed-profile.sh doctor.sh collect-logs.sh maintain-profile.mjs enable-lan.sh installer.sh README.txt; do
-  [ -f "$BUILD/$script" ] && cp "$BUILD/$script" "$STAGE/body/package/payload/scripts/"
+  [ -f "$BUILD/$script" ] && cp "$BUILD/$script" "$SCRIPTS_DIR/"
 done
-[ -f "$STAGE/body/package/payload/scripts/seed-profile.sh" ] || { echo "[错误] 缺 seed-profile.sh"; exit 1; }
-[ -f "$STAGE/body/package/payload/scripts/installer.sh" ] || { echo "[错误] 缺 installer.sh"; exit 1; }
-ln -s "$APP" "$STAGE/body/package/payload/app"
-ln -s "$BUILD/node" "$STAGE/body/package/payload/node"
-[ -d "$BUILD/desktop" ] && ln -s "$BUILD/desktop" "$STAGE/body/package/payload/desktop"
-[ -d "$BUILD/tools" ] && ln -s "$BUILD/tools" "$STAGE/body/package/payload/tools"
-[ -d "$BUILD/browser" ] && ln -s "$BUILD/browser" "$STAGE/body/package/payload/browser"
-"$BUILD/node/bin/node" - "$STAGE/body/package/component.json" "$BODY_VERSION" "$DSH_VER" <<'JSEOF'
+[ -f "$SCRIPTS_DIR/seed-profile.sh" ] || { echo "[错误] 缺 seed-profile.sh"; exit 1; }
+[ -f "$SCRIPTS_DIR/installer.sh" ] || { echo "[错误] 缺 installer.sh"; exit 1; }
+SCRIPTS_VERSION="$(cd "$SCRIPTS_DIR" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)"
+
+# makeComponent <name> <kind> <version> <order> <payload-root> <payload-subdir>
+makeComponent() {
+  local name="$1" kind="$2" version="$3" order="$4" payloadRoot="$5" subdir="$6" slug work tarfile
+  slug="$(slugOf "$name")"
+  work="$STAGE/comp-$slug"
+  rm -rf "$work"
+  mkdir -p "$work/package/payload/$(dirname "$subdir")"
+  printf '%s\n' "$version" > "$work/package/payload/VERSION"
+  cp "$BUILD/component/$kind/install.sh" "$work/package/install.sh"
+  chmod 755 "$work/package/install.sh"
+  ln -s "$payloadRoot" "$work/package/payload/$subdir"
+  # core 组件同时携带 Node 运行时（脚本/壳/工具在各自组件里）。
+  [ "$kind" = "core" ] && ln -s "$BUILD/node" "$work/package/payload/node"
+  "$BUILD/node/bin/node" - "$work/package/component.json" "$name" "$kind" "$version" "$DSH_VER" "$order" <<'JSEOF'
 const fs = require('fs')
-const [file, version, dshVersion] = process.argv.slice(2)
+const [file, name, kind, version, dshVersion, order] = process.argv.slice(2)
 fs.writeFileSync(file, JSON.stringify({
-  name: '@deepseek-ai/dsh',
-  kind: 'body',
-  version,
-  dshVersion,
-  order: 0,
+  name, kind, version, dshVersion, order: Number(order),
+  policy: { defaultEnabled: true, enforced: false },
   installedBy: 'installer',
 }, null, 2) + '\n')
 JSEOF
-tar czhf "$DIST/components/dsh-body-$BODY_VERSION.tar.gz" -C "$STAGE/body" package/component.json package/install.sh package/payload
-echo "  组件: dsh-body-$BODY_VERSION.tar.gz ($(du -h "$DIST/components/dsh-body-$BODY_VERSION.tar.gz" | cut -f1))"
+  tarfile="$DIST/components/$slug-$version.tar.gz"
+  tar czhf "$tarfile" -C "$work" package/component.json package/install.sh package/payload
+  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$kind" "$version" "$order" "components/$(basename "$tarfile")" >> "$STAGE/components.list"
+  echo "  组件: $(basename "$tarfile") ($(du -h "$tarfile" | cut -f1))"
+}
+
+makeComponent "@deepseek-ai/dsh-core"    core    "$PKG_VERSION"     0  "$APP"                    app
+makeComponent "@deepseek-ai/dsh-scripts" scripts "$SCRIPTS_VERSION" 2 "$SCRIPTS_DIR" scripts
+[ -d "$BUILD/desktop" ] && makeComponent "@deepseek-ai/dsh-shell" shell "$PKG_VERSION" 3 "$BUILD/desktop" desktop
+[ -d "$BUILD/tools" ]   && makeComponent "@deepseek-ai/dsh-tools" tools "$PKG_VERSION" 1 "$BUILD/tools"   tools
 
 # ---------- 插件组件 ----------
 echo "=== 2. 插件组件 ==="
@@ -124,14 +142,22 @@ JSEOF
 done < "$STAGE/plugins.list"
 
 # ---------- installer + manifest ----------
+printf '%s\n' "$PKG_VERSION" > "$DIST/VERSION"
 echo "=== 3. installer 与清单 ==="
 cp "$BUILD/installer.sh" "$DIST/installer.sh"
 chmod 755 "$DIST/installer.sh"
-printf '%s\n' "$PKG_VERSION" > "$DIST/VERSION"
-"$BUILD/node/bin/node" - "$DIST" "$BUILD" "$PKG_VERSION" "$DSH_VER" <<'JSEOF'
-const fs = require('fs'), path = require('path'), crypto = require('node:crypto')
-const [dist, buildRoot, version, dshVersion] = process.argv.slice(2)
-function sha256(file) {
+
+"$BUILD/node/bin/node" - "$DIST" "$PKG_VERSION" "$DSH_VER" "$STAGE/components.list" "$STAGE/plugins.list" <<'JSEOF'
+const fs = require('node:fs')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const dist = process.argv[2]
+const version = process.argv[3]
+const dshVersion = process.argv[4]
+const componentsList = process.argv[5]
+const pluginsList = process.argv[6]
+
+const sha256 = (file) => {
   const hash = crypto.createHash('sha256')
   const fd = fs.openSync(file, 'r')
   const buffer = Buffer.alloc(1 << 20)
@@ -140,52 +166,51 @@ function sha256(file) {
   fs.closeSync(fd)
   return hash.digest('hex')
 }
-const componentsDir = path.join(dist, 'components')
-const files = fs.readdirSync(componentsDir).filter((file) => file.endsWith('.tar.gz')).sort()
-const body = files.find((file) => file.startsWith('dsh-body-'))
-const plugins = files.filter((file) => !file.startsWith('dsh-body-'))
+
 const components = []
-const bodyVersion = version
-components.push({
+
+for (const line of fs.readFileSync(componentsList, 'utf8').split('\n')) {
+  if (line === '') continue
+  const [name, kind, entryVersion, order, file] = line.split('\t')
+  const abs = path.join(dist, file)
+  components.push({
+    name, kind, version: entryVersion, order: Number(order),
     policy: { defaultEnabled: true, enforced: false },
-  name: '@deepseek-ai/dsh', kind: 'body', version: bodyVersion, order: 0,
-  file: `components/${body}`,
-  sha256: sha256(path.join(componentsDir, body)),
-  size: fs.statSync(path.join(componentsDir, body)).size,
-})
-// 插件元数据从组件包里的 component.json 读一遍（tar 太贵，改用打包时写下的清单文件）。
-const listFile = path.join(buildRoot, '.dist-stage', 'plugins.list')
-const rows = fs.readFileSync(listFile, 'utf8').split('\n').filter(Boolean).map((line) => line.split('\t'))
-let index = 0
-for (const [name, pluginVersion, entryId, order, disabled, alwaysLast] of rows) {
-  const slug = name.replace(/^@/u, '').replaceAll('/', '-')
-  const file = plugins.find((candidate) => candidate === `${slug}-${pluginVersion}.tar.gz`)
-  if (file === undefined) { console.error(`[错误] 清单缺组件包: ${slug}-${pluginVersion}.tar.gz`); process.exit(1) }
-  const entry = {
-    name, kind: 'plugin', version: pluginVersion, entryId, order: Number(order),
-    file: `components/${file}`,
-    sha256: sha256(path.join(componentsDir, file)),
-    size: fs.statSync(path.join(componentsDir, file)).size,
-  }
-  if (disabled === '1') entry.disabled = true
-  if (alwaysLast === '1') entry.alwaysLast = true
-  entry.policy = { defaultEnabled: disabled !== '1', enforced: alwaysLast === '1' }
-  components.push(entry)
-  index += 1
+    file, sha256: sha256(abs), size: fs.statSync(abs).size,
+  })
 }
+
+if (fs.existsSync(pluginsList)) {
+  for (const line of fs.readFileSync(pluginsList, 'utf8').split('\n')) {
+    if (line === '') continue
+    const [name, pluginVersion, entryId, order, disabled, alwaysLast] = line.split('\t')
+    if (disabled === undefined) continue
+    const slug = name.replace(/^@/u, '').replaceAll('/', '-')
+    const file = `components/${slug}-${pluginVersion}.tar.gz`
+    const abs = path.join(dist, file)
+    components.push({
+      name, kind: 'plugin', version: pluginVersion, entryId, order: Number(order),
+      policy: { defaultEnabled: disabled !== '1', enforced: alwaysLast === '1' },
+      file, sha256: sha256(abs), size: fs.statSync(abs).size,
+    })
+  }
+}
+
 components.sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
+
 const manifest = {
   format: 3,
-  generatedAt: new Date().toISOString(),
   version,
   dshVersion,
+  generatedAt: new Date().toISOString(),
   installer: { version, file: 'installer.sh' },
   components,
 }
 fs.writeFileSync(path.join(dist, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
-console.log(`  清单: ${components.length} 个组件（本体 1 + 插件 ${index}）`)
+const body = components.filter((component) => component.kind !== 'plugin')
+const plugins = components.filter((component) => component.kind === 'plugin')
+console.log(`  清单: ${components.length} 个组件（主体 ${body.length} + 插件 ${plugins.length}）`)
 JSEOF
-rm -rf "$STAGE"
 
 # ---------- 介质自检清单 + 离线安装入口 ----------
 # 离线交付是"整目录拷介质"：先校验完整性再安装，防止 U 盘/共享目录拷贝损坏。

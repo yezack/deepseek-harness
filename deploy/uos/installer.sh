@@ -160,58 +160,44 @@ PYEOF
 MANIFEST_VERSION="$(json_get "$MANIFEST" 'v.version')"
 DSH_VER="$(json_get "$MANIFEST" 'v.dshVersion')"
 
-# ---------- 组件状态（自动探查，不依赖状态文件）----------
-# 本机装了什么，以 $DEST 里的实际目录为准：本体看 .installed-version，插件逐个
-# 扫 $DEST/plugins/<包名>/component.json。手工装/单独装/旧状态文件缺失都能认出来。
+# ---------- 组件状态 ----------
+# installed.json 是权威来源（每个组件装成功时由 installer 写入）；目录扫描只作兜底：
+# 插件树里还有 component.json，旧版整包安装只有 .installed-version。
 INSTALLED_SCAN=""
 scan_installed() {
   [ -n "$INSTALLED_SCAN" ] && { printf '%s\n' "$INSTALLED_SCAN"; return 0; }
-  if [ -n "$NODE_BIN" ]; then
-    INSTALLED_SCAN="$("$NODE_BIN" - "$DEST" <<'JSEOF'
-const fs = require('node:fs')
-const path = require('node:path')
-const dest = process.argv[2]
-const rows = []
-const readVersion = (file) => {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')).version } catch { return undefined }
-}
-const bodyVersion = readVersion(path.join(dest, '.installed-version'))
-if (bodyVersion !== undefined) rows.push(['@deepseek-ai/dsh', 'body', bodyVersion].join('\t'))
-const pluginsRoot = path.join(dest, 'plugins')
-function walk(dir) {
-  let entries
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
-    const full = path.join(dir, entry.name)
-    if (entry.name.startsWith('@')) { walk(full); continue }
-    let name = entry.name
-    let version = readVersion(path.join(full, '.installed-version'))
-    try {
-      const meta = JSON.parse(fs.readFileSync(path.join(full, 'component.json'), 'utf8'))
-      if (typeof meta.name === 'string') name = meta.name
-      if (typeof meta.version === 'string') version = meta.version
-    } catch { /* 没有 component.json：按目录名 + .installed-version 认 */ }
-    if (version !== undefined) rows.push([name, 'plugin', version].join('\t'))
-  }
-}
-walk(pluginsRoot)
-console.log(rows.join('\n'))
-JSEOF
-)"
-  else
-    INSTALLED_SCAN="$(python3 - "$DEST" <<'PYEOF'
+  INSTALLED_SCAN="$(python3 - "$DEST" <<'PYEOF'
 import json, os, sys
+
 dest = sys.argv[1]
 rows = []
+seen = set()
+
 def read_version(path):
     try:
         return json.load(open(path)).get('version')
     except Exception:
         return None
+
+state_file = os.path.join(dest, 'installed.json')
+if os.path.exists(state_file):
+    try:
+        state = json.load(open(state_file))
+    except Exception:
+        state = {}
+    for name, entry in (state.get('components') or {}).items():
+        version = entry.get('version')
+        kind = entry.get('kind') or 'plugin'
+        if version:
+            rows.append('%s\t%s\t%s' % (name, kind, version))
+            seen.add(name)
+
+# 旧布局兜底：只有 .installed-version 没有 state 条目时，认成本体。
 body = read_version(os.path.join(dest, '.installed-version'))
-if body:
-    rows.append('@deepseek-ai/dsh\tbody\t' + str(body))
+if body and '@deepseek-ai/dsh' not in seen:
+    rows.append('@deepseek-ai/dsh\tbody\t%s' % body)
+
+# 插件树兜底：装了但 state 缺失的插件。
 for dirpath, dirnames, filenames in os.walk(os.path.join(dest, 'plugins')):
     if 'component.json' not in filenames:
         continue
@@ -220,13 +206,16 @@ for dirpath, dirnames, filenames in os.walk(os.path.join(dest, 'plugins')):
     except Exception:
         continue
     name = meta.get('name') or os.path.basename(dirpath)
+    if name in seen:
+        continue
     version = meta.get('version') or read_version(os.path.join(dirpath, '.installed-version'))
     if version:
-        rows.append(str(name) + '\tplugin\t' + str(version))
+        rows.append('%s\tplugin\t%s' % (name, version))
+        seen.add(name)
+
 print('\n'.join(rows))
 PYEOF
 )"
-  fi
   printf '%s\n' "$INSTALLED_SCAN"
 }
 installed_version_of() {
@@ -315,6 +304,34 @@ journal_step() { # journal_step <name> <kind> <target> <backup|->
   # 全制表符分隔，避免 awk 字段错位（回滚时按 $2..$5 读取）。
   printf 'STEP\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$JOURNAL_FILE"
 }
+# 清理 installed.json 里已经不在清单中的组件（例如旧 body 拆成 core/tools/scripts/shell 之后）。
+state_prune() {
+  [ -f "$STATE_FILE" ] || return 0
+  [ -f "$MANIFEST" ] || return 0
+  python3 - "$STATE_FILE" "$MANIFEST" <<'PYEOF'
+import json, sys
+state_file, manifest_file = sys.argv[1], sys.argv[2]
+try:
+    state = json.load(open(state_file))
+except Exception:
+    sys.exit(0)
+try:
+    manifest = json.load(open(manifest_file))
+except Exception:
+    sys.exit(0)
+names = {c.get('name') for c in manifest.get('components', []) if c.get('name')}
+components = state.get('components') or {}
+removed = [name for name in list(components) if name not in names]
+for name in removed:
+    components.pop(name, None)
+if removed:
+    state['components'] = components
+    json.dump(state, open(state_file, 'w'), ensure_ascii=False, indent=2)
+    open(state_file, 'a').write('\n')
+    print('  清单外组件已清理: ' + ', '.join(removed))
+PYEOF
+}
+
 journal_commit() {
   local gen
   gen="$(( $(current_gen) + 1 ))"
@@ -324,8 +341,8 @@ journal_commit() {
   rm -f "$JOURNAL_FILE"
   TXN_ARMED=0
   trap - EXIT INT TERM
+  state_prune
   prune_backups "$gen"
-  log "事务提交：generation $gen"
 }
 journal_abort() {
   trap - EXIT INT TERM
@@ -343,7 +360,7 @@ journal_abort() {
       rm -rf "$target"
       if mv "$backup" "$target"; then
         restored=$((restored + 1))
-        if [ "$kind" = "body" ] && [ -f "$target/.dsh-body-version" ]; then
+        if { [ "$kind" = "body" ] || [ "$kind" = "core" ]; } && [ -f "$target/.dsh-body-version" ]; then
           cp -f "$target/.dsh-body-version" "$DEST/.installed-version" 2>/dev/null || true
           rm -f "$target/.dsh-body-version"
         fi
@@ -366,7 +383,13 @@ prune_backups() { # 只保留最近两代备份
   done
 }
 component_target() { # component_target <name> <kind>
-  if [ "$2" = "body" ]; then printf '%s' "$DEST/app"; else printf '%s' "$DEST/plugins/$1"; fi
+  case "$2" in
+    body|core) printf '%s' "$DEST/app" ;;
+    shell)     printf '%s' "${DSH_ELECTRON_DIR:-/var/tmp/dsh-electron}" ;;
+    plugin)    printf '%s' "$DEST/plugins/$1" ;;
+    # scripts/tools 直接覆盖若干小文件，没有需要整目录备份的落点
+    *)         printf '%s' "" ;;
+  esac
 }
 backup_target() { # backup_target <target> <gen>；目标不存在返回 "-"；已有同代备份则复用
   local target="$1" gen="$2" backup
@@ -478,7 +501,7 @@ install_component() { # install_component <index> [upgrade]
     txn_backup="$(backup_target "$txn_target" "$(current_gen)")"
   fi
   # 本体的版本标记在 $DEST/.installed-version（目录外），复制一份进备份，回滚时还原。
-  if [ "$kind" = "body" ] && [ -d "$txn_backup" ] && [ -f "$DEST/.installed-version" ]; then
+  if { [ "$kind" = "body" ] || [ "$kind" = "core" ]; } && [ -d "$txn_backup" ] && [ -f "$DEST/.installed-version" ]; then
     cp -f "$DEST/.installed-version" "$txn_backup/.dsh-body-version" 2>/dev/null || true
   fi
   journal_step "$name" "$kind" "$txn_target" "$txn_backup"
@@ -615,7 +638,7 @@ print_plan() {
     for target in "${targets[@]}"; do
       [ "$target" = "all" ] && wanted=1
       [ "$target" = "$name" ] && wanted=1
-      [ "$target" = "body" ] && [ "$kind" = "body" ] && wanted=1
+      { [ "$target" = "body" ] || [ "$target" = "core" ]; } && { [ "$kind" = "body" ] || [ "$kind" = "core" ]; } && wanted=1
     done
     if [ "$wanted" = "1" ]; then
       current="$(installed_version_of "$name" "$kind" || true)"
@@ -666,7 +689,7 @@ cmd_install() {
     for target in "${targets[@]}"; do
       [ "$target" = "all" ] && wanted=1
       [ "$target" = "$name" ] && wanted=1
-      [ "$target" = "body" ] && [ "$kind" = "body" ] && wanted=1
+      { [ "$target" = "body" ] || [ "$target" = "core" ]; } && { [ "$kind" = "body" ] || [ "$kind" = "core" ]; } && wanted=1
     done
     if [ "$wanted" = "1" ]; then
       # 插件依赖本体：没有任何本体安装在位时，先装本体。
@@ -676,7 +699,7 @@ cmd_install() {
         body_done=1
       fi
       install_component "$i" install || failed=$((failed + 1))
-      [ "$kind" = "body" ] && body_done=1
+      { [ "$kind" = "body" ] || [ "$kind" = "core" ]; } && body_done=1
     fi
     i=$((i + 1))
   done
@@ -724,7 +747,7 @@ cmd_remove() {
   local failed=0
   for name in "${ARGS[@]}"; do
     case "$name" in
-      @deepseek-ai/dsh|body) fail "本体不能用 remove 卸载；请用 $DEST/uninstall.sh" ;;
+      @deepseek-ai/dsh|body|core) fail "本体不能用 remove 卸载；请用 $DEST/uninstall.sh" ;;
     esac
     if [ -d "$DEST/plugins/$name" ]; then
       echo "PHASE 卸载 $name"
