@@ -13,7 +13,6 @@ const fs = require('node:fs')
 const os = require('node:os')
 const http = require('node:http')
 const path = require('node:path')
-const updater = require('./updater')
 
 const DEST = process.env.DSH_DEST || '/deepseek-harness'
 const PORT = Number(process.env.DSH_PORT || 3080)
@@ -221,8 +220,14 @@ async function restartServer() {
  * （组件粒度分发下每个插件版本各不相同，用"个"比列一串版本更可读）。
  */
 function versionsSummary() {
-  const body = updater.installedVersion()
-  const state = updater.installedState()
+  let state = null
+  let body = null
+  try {
+    state = JSON.parse(fs.readFileSync(path.join(DEST, 'installed.json'), 'utf8'))
+    body = state.components?.['@deepseek-ai/dsh'] ?? null
+  } catch (error) {
+    /* 读不到就显示未知 */
+  }
   const bodyText = `本体 ${body?.version ?? '未知'}`
   if (state === null) return bodyText
   const plugins = Object.values(state.components).filter((entry) => entry?.kind === 'plugin').length
@@ -237,266 +242,12 @@ function buildTray() {
     { label: '打开 Agent', click: () => openAgent() },
     { label: '在浏览器打开', click: () => openInBrowser() },
     { type: 'separator' },
-    { label: '检查更新', click: () => { void checkForUpdates() } },
     { label: '重启服务', click: () => { void restartServer() } },
     { type: 'separator' },
     { label: `当前版本: ${versionsSummary()}`, enabled: false },
     { label: '退出', click: () => quitApplication() },
   ]))
   tray.on('click', () => openAgent())
-}
-
-// ===== 自动升级（静态清单 + installer 执行） =====
-// 规则：
-//   - 分发是组件粒度：一个 installer + 本体组件 + 每个插件一个组件，没有整包；
-//   - 壳不自己下载/解包/回滚，只读清单做检查，再用 sudo 调 installer 执行升级；
-//   - 启动时检查一次；运行中每 1 小时静默检查；托盘可手动检查；
-//   - 强制更新由组件清单的 minVersion 判定：该组件本机版本 < minVersion 时**不启动
-//     DSH 本体**，直接显示强制更新窗口（窗口数据取触发强制更新的那个组件）；
-//   - 普通（建议）更新在对话框里问一句，并列出有变化的组件。
-const AUTO = process.env.DSH_DESKTOP_AUTOTEST === 'update'
-const CHECK_INTERVAL_MS = 60 * 60 * 1000
-let upgrading = false
-let progressWindow = null
-let forcedWindow = null
-let forcedState = null
-let pendingUpdate = null
-let periodicTimer = null
-
-/** 组件的可读名字：本体 / 插件 <name>。 */
-function componentLabel(component) {
-  return component.kind === 'body' ? '本体' : `插件 ${component.name}`
-}
-
-/** 本次需要安装的组件（按清单 order：本体在前，插件按各自的 order）。 */
-function pendingComponents(result) {
-  return (result.components ?? []).filter((component) => component.needsUpdate)
-}
-
-/**
- * 强制更新窗口的数据：取"触发强制更新"的那个组件（本机版本低于它 minVersion 的第一个）。
- * 其余字段沿用整份检查结果 —— 窗口里的"立即更新"要复用它来跑同一个升级流程。
- * @param {object} result updater.check() 的结果
- * @returns {object|null} 检查结果 + component；没有组件命中时返回 null
- */
-function forcedView(result) {
-  const component = (result.components ?? []).find((entry) => entry.forced)
-  if (component === undefined) return null
-  return {
-    ...result,
-    component,
-    manifest: {
-      ...result.manifest,
-      minVersion: component.minVersion,
-      version: component.version,
-      notes: result.manifest?.notes ?? '',
-    },
-  }
-}
-
-function createProgressWindow() {
-  progressWindow = new BrowserWindow({
-    width: 460,
-    height: 190,
-    title: '正在升级 DeepSeek Harness',
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    alwaysOnTop: true,
-    autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
-  })
-  progressWindow.loadFile(path.join(__dirname, 'progress.html'))
-  return new Promise((resolve) => { progressWindow.webContents.once('did-finish-load', resolve) })
-}
-
-/**
- * 进度窗：installer 只给 PHASE 短语、没有百分比，所以标题直接用短语
- * （如「正在安装 dsh-better-sidebar」），进度条置满只表示"进行中"。
- */
-function reportProgress(progress) {
-  if (progressWindow === null) return
-  const phase = typeof progress?.phase === 'string' && progress.phase !== '' ? progress.phase : '正在升级…'
-  progressWindow.webContents
-    .executeJavaScript(`window.setProgress(1, ${JSON.stringify('请勿关闭应用')}); window.setPhase(${JSON.stringify(phase)})`)
-    .catch(() => {})
-}
-
-/** 统一提示：AUTO（无人值守演练）模式下只写日志，不弹窗。 */
-function notify(message, detail, isError = false) {
-  if (AUTO) {
-    log(`notify${isError ? '[error]' : ''}: ${message}${detail ? ` / ${detail}` : ''}`)
-    return
-  }
-  if (isError) dialog.showErrorBox(message, detail ?? '')
-  else dialog.showMessageBoxSync({ type: 'info', title: '检查更新', message, detail })
-}
-
-// ---- 强制更新窗口（不启动 DSH 本体时显示） ----
-function showForcedWindow(state) {
-  forcedState = state
-  if (forcedWindow !== null) {
-    forcedWindow.show()
-    forcedWindow.focus()
-    return
-  }
-  forcedWindow = new BrowserWindow({
-    width: 760,
-    height: 540,
-    title: '需要更新后才能继续使用',
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    autoHideMenuBar: true,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      preload: path.join(__dirname, 'preload.js'),
-    },
-  })
-  forcedWindow.on('closed', () => { forcedWindow = null })
-  void forcedWindow.loadFile(path.join(__dirname, 'forced.html'))
-}
-
-// 强制更新窗口的数据：值全部取"触发强制更新的那个组件"，字段名保持不变。
-ipcMain.on('force-data', (event) => {
-  const state = forcedState
-  event.returnValue = state === null
-    ? {}
-    : {
-        installed: state.component.installed ?? 'unknown',
-        minVersion: state.component.minVersion ?? '',
-        latest: state.component.version,
-        dshVersion: state.manifest?.dshVersion ?? '',
-        notes: state.manifest?.notes ?? '',
-      }
-})
-ipcMain.on('force-upgrade', () => {
-  if (forcedState !== null) void upgradeAndRestart(forcedState)
-})
-ipcMain.on('force-quit', () => quitApplication())
-
-/** 执行升级：进度窗 → installer（下载/校验/安装/重播 profile 全在里面）→ 停服务 → 重启壳。 */
-async function upgradeAndRestart(result) {
-  if (upgrading) return
-  upgrading = true
-  let progressReady = false
-  try {
-    const pending = pendingComponents(result)
-    if (pending.length === 0) {
-      log('upgrade: 没有需要安装的组件')
-      return
-    }
-    await createProgressWindow()
-    progressReady = true
-    // 第一个 PHASE 之前 installer 要先取清单/下组件，先给个标题避免停在静态文案上。
-    reportProgress({ phase: '正在准备升级（约 3–5 分钟）…' })
-    const outcome = await updater.installUpdates(result, {
-      log,
-      onProgress: (progress) => reportProgress(progress),
-    })
-    log(`upgrade: installer 完成\n${outcome.output}`)
-    progressWindow?.close()
-    progressWindow = null
-    notify(`已升级：${pending.map((component) => `${componentLabel(component)} ${component.version}`).join('，')}`)
-    log(`upgrade done -> ${versionsSummary()}`)
-    await stopServer()
-    app.relaunch()
-    app.exit(0)
-  } catch (error) {
-    log(`upgrade failed: ${error.message}`)
-    if (progressReady) { progressWindow?.close(); progressWindow = null }
-    notify('升级失败', String(error.message ?? error), true)
-  } finally {
-    upgrading = false
-  }
-}
-
-/** 手动 / 每小时静默检查。silent=true 时只有强制更新才打扰用户。 */
-async function checkForUpdates({ silent = false } = {}) {
-  if (upgrading) return
-  const result = await updater.check({ log })
-  if (result.status === 'no-config') {
-    if (!silent) notify('未配置更新源', result.message)
-    return
-  }
-  if (result.status === 'error') {
-    if (!silent) notify('检查更新失败', result.message, true)
-    return
-  }
-  if (result.status === 'up-to-date') {
-    if (!silent) notify(result.message)
-    return
-  }
-  if (result.forced) {
-    const forced = forcedView(result)
-    if (forced !== null) {
-      log(`check: 命中强制更新（${componentLabel(forced.component)}），停止服务并显示强制更新窗口`)
-      await stopServer()
-      showForcedWindow(forced)
-      return
-    }
-  }
-  pendingUpdate = result
-  const pending = pendingComponents(result)
-  if (silent) {
-    log(`check: 发现新版本 ${pending.map((component) => `${componentLabel(component)} ${component.version}`).join('，')}（静默，等用户从托盘升级）`)
-    return
-  }
-  if (AUTO) {
-    log('autotest: 跳过确认，直接升级')
-    await upgradeAndRestart(result)
-    return
-  }
-  // 只有变了的组件才列出来；没变化的组件升级后会保持原样。
-  const detail = [
-    ...pending.map((component) => `${componentLabel(component)} ${component.installed ?? '未安装'} → ${component.version}`),
-    result.manifest?.dshVersion ? `dsh: ${result.manifest.dshVersion}` : '',
-    result.manifest?.notes ? `\n更新说明:\n${result.manifest.notes}` : '',
-  ].filter(Boolean).join('\n')
-  const answer = dialog.showMessageBoxSync({
-    type: 'question',
-    title: '发现新版本',
-    message: `发现新版本：${pending.length} 个组件`,
-    detail,
-    buttons: ['现在升级', '稍后'],
-    defaultId: 0,
-    cancelId: 1,
-  })
-  if (answer === 0) await upgradeAndRestart(result)
-}
-
-/**
- * 启动闸门。返回 true = 正常启动 DSH 本体；false = 已进入强制更新界面。
- * 拉不到清单时按"离线可用"处理（不能因为更新服务器挂了就让所有人开不了机）。
- */
-async function startupGate() {
-  let result
-  try {
-    result = await updater.check({ log })
-  } catch (error) {
-    log(`startup: 更新检查异常（按离线继续）: ${error.message}`)
-    return true
-  }
-  if (result.status === 'available' && result.forced) {
-    const forced = forcedView(result)
-    if (forced !== null) {
-      log(`startup: 强制更新 ${componentLabel(forced.component)} 本地 ${forced.component.installed ?? 'unknown'} < 最低 ${forced.component.minVersion}`)
-      showForcedWindow(forced)
-      return false
-    }
-  }
-  if (result.status === 'available') {
-    pendingUpdate = result
-    log(`startup: 发现新版本 ${pendingComponents(result).map((component) => `${componentLabel(component)} ${component.version}`).join('，')}`)
-  } else if (result.status === 'up-to-date') {
-    log('startup: 已是最新')
-  } else if (result.status === 'error') {
-    log(`startup: 更新检查失败（按离线继续）: ${result.message}`)
-  } else {
-    log('startup: 未配置更新源')
-  }
-  return true
 }
 
 /**
@@ -529,11 +280,6 @@ function enforceForcedBundles() {
   }
 }
 
-function startPeriodicCheck() {
-  if (periodicTimer !== null) return
-  periodicTimer = setInterval(() => { void checkForUpdates({ silent: true }) }, CHECK_INTERVAL_MS)
-  log('update: 每小时静默检查已启用')
-}
 
 function quitApplication() {
   quitting = true
@@ -557,31 +303,15 @@ if (!gotLock) {
   app.on('window-all-closed', () => { /* 托盘常驻 */ })
   app.whenReady().then(async () => {
     buildTray()
-    // 启动闸门：命中强制更新时不启动 DSH 本体，只显示强制更新窗口。
-    const shouldStartServer = await startupGate()
-    if (!shouldStartServer) {
-      log('startup: 强制更新模式（未启动 DSH 本体）')
-      return
-    }
     enforceForcedBundles()
     createWindow()
     await loadUi()
-    startPeriodicCheck()
-    // 启动时发现"建议更新"：问一次（AUTO 演练则直接升级）。
-    if (pendingUpdate !== null) {
-      log('startup: 提示建议更新')
-      void checkForUpdates()
-    }
     // 自动验收（仅测试用）：验证"在浏览器打开"与"退出即结束整个服务进程"两条路径。
     if (process.env.DSH_DESKTOP_AUTOTEST === 'quit') {
       log('autotest: openInBrowser then quit')
       openInBrowser()
       setTimeout(() => quitApplication(), 2000)
     }
-    // 自动验收（仅测试用）：完整走一遍"检查更新 → 下载 → 校验 → 安装 → 重启"。
-    if (process.env.DSH_DESKTOP_AUTOTEST === 'update') {
-      log('autotest: checkForUpdates')
-      setTimeout(() => { void checkForUpdates() }, 5000)
-    }
   })
+
 }

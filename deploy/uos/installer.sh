@@ -27,7 +27,6 @@
 #
 # 选项：
 #   --dist DIR         分发目录（默认本脚本所在目录）
-#   --server URL       在线模式：清单和组件从 URL 前缀下载（磁盘上是离线模式）
 #   --dry-run          只打印计划，不改动磁盘
 #   --yes              非交互
 #   --no-seed          不重播 profile（调试用）
@@ -39,10 +38,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="${DSH_DEST:-/deepseek-harness}"
 INSTALL_NODE_DIR="${DSH_NODE_DIR:-/var/tmp/dsh-node}"
 STATE_FILE="$DEST/installed.json"
-CACHE_ROOT="/var/tmp/dsh-installer"
 
 DIST=""
-SERVER=""
 ASSUME_YES=0
 DO_SEED=1
 JSON=0
@@ -55,7 +52,6 @@ ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do
   case "$1" in
     --dist) DIST="${2:-}"; shift 2 ;;
-    --server) SERVER="${2:-}"; shift 2 ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --no-seed) DO_SEED=0; shift ;;
     --json) JSON=1; shift ;;
@@ -132,30 +128,9 @@ fi
 
 # ---------- 清单获取 ----------
 WORK="$DIST"
-if [ -n "$SERVER" ]; then
-  need_root
-  mkdir -p "$CACHE_ROOT"
-  # --server 既接受目录（拼 manifest.json），也接受清单文件 URL（……/manifest.json 或 ……/latest.json）。
-  case "$SERVER" in
-    *.json) MANIFEST_URL="$SERVER"; SERVER_BASE="${SERVER%/*}" ;;
-    */) MANIFEST_URL="${SERVER}manifest.json"; SERVER_BASE="${SERVER%/}" ;;
-    *) MANIFEST_URL="$SERVER/manifest.json"; SERVER_BASE="$SERVER" ;;
-  esac
-  tmp="$CACHE_ROOT/manifest.tmp"
-  curl -fsSL --max-time 60 "$MANIFEST_URL" -o "$tmp" || fail "下载清单失败：$MANIFEST_URL"
-  version="$("$INSTALL_NODE_DIR/bin/node" -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).version' "$tmp" 2>/dev/null || echo "")"
-  [ -n "$version" ] || fail "远端清单格式不正确（缺 version）"
-  WORK="$CACHE_ROOT/$version"
-  mkdir -p "$WORK/components"
-  cp "$tmp" "$WORK/manifest.json"
-  rm -f "$tmp"
-  # 组件包按清单里的相对路径从清单所在目录取。
-  SERVER="$SERVER_BASE"
-  log "在线模式：清单 $MANIFEST_URL（版本 $version）"
-fi
 
 MANIFEST="$WORK/manifest.json"
-[ -f "$MANIFEST" ] || fail "找不到清单：$MANIFEST（用 --dist 指定分发目录，或 --server 指定更新源）"
+[ -f "$MANIFEST" ] || fail "找不到清单：$MANIFEST（用 --dist 指定离线分发目录）"
 NODE_BIN="$INSTALL_NODE_DIR/bin/node"
 [ -x "$NODE_BIN" ] || NODE_BIN="$DEST/node/bin/node"
 if [ ! -x "$NODE_BIN" ]; then
@@ -452,14 +427,6 @@ component_count() { json_query "$MANIFEST" count; }
 
 resolve_component_file() { # resolve_component_file <manifest-relative-file>
   if [ -f "$WORK/$1" ]; then printf '%s' "$WORK/$1"; return 0; fi
-  if [ -n "$SERVER" ]; then
-    mkdir -p "$(dirname "$WORK/$1")"
-    # 清单里的路径相对分发根（components/x.tar.gz），先按原路径取，再退回文件名。
-    curl -fsSL --max-time 3600 "$SERVER/$1" -o "$WORK/$1" 2>/dev/null \
-      || curl -fsSL --max-time 3600 "$SERVER/${1#components/}" -o "$WORK/$1" \
-      || return 1
-    return 0
-  fi
   return 1
 }
 

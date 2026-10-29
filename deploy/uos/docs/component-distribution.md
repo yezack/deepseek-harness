@@ -128,9 +128,9 @@ installer 直接 `ERROR` 并提示用新介质重装（不做自动迁移）。
 | `seed` | 只重播 profile |
 | `doctor` | 调用已安装的 doctor.sh |
 
-桌面壳只保留一个本地入口：托盘「从离线包升级…」→ 选介质目录 → `sudo installer apply
---dist <选中目录>`，解析 `PHASE/PROGRESS/RESULT/TXN` 输出显示进度。壳不再有网络检查、
-强制更新窗口。
+桌面壳不提供任何升级入口：升级 = 换介质后运行 `./install.sh`（离线介质本身就是升级器），
+壳只负责界面、托盘与守护服务进程。
+
 
 ## 5. 配置分层（profile patch 三段式）
 
