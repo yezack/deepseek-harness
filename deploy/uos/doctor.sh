@@ -14,14 +14,13 @@ DEST="${1:-${DSH_DEST:-/deepseek-harness}}"
 NODE_BIN="$DEST/node/bin/node"
 [ -x "$NODE_BIN" ] || NODE_BIN="/var/tmp/dsh-node/bin/node"
 PROFILE_HOME="${DSH_HOME:-$HOME/.dsh}/profiles/web"
-# 插件是独立发布单元，装在自己的目录；旧布局（插件混在本体树里）自动回落。
-PLUGIN_ROOT="$DEST/plugins/app"
-[ -d "$PLUGIN_ROOT/node_modules" ] || PLUGIN_ROOT="$DEST/app"
-# 某个包实际落在哪棵树：插件树优先，其次本体树。
+# 组件布局：每个插件一棵自包含树（$DEST/plugins/<pkg>/node_modules），本体在 $DEST/app。
+# 某个包实际落在哪棵树：先查各插件树，再回落到本体树。
 modpath() {
-  local name="$1"
-  if [ -d "$PLUGIN_ROOT/node_modules/$name" ]; then
-    printf '%s\n' "$PLUGIN_ROOT/node_modules/$name"
+  local name="$1" hit
+  hit="$(find "$DEST/plugins" -maxdepth 6 -type d -path "*/node_modules/$name" 2>/dev/null | head -1)"
+  if [ -n "$hit" ]; then
+    printf '%s\n' "$hit"
   else
     printf '%s\n' "$DEST/app/node_modules/$name"
   fi
@@ -65,7 +64,6 @@ NM_FAIL=0
 for mod in \
   "@univerjs-pro/engine-formula-rust-binding" \
   "@univerjs-pro/exchange-node-binding" \
-  "libsql" \
   "node-pty" \
   "koffi" \
   "sharp"; do
@@ -83,16 +81,26 @@ done
 [ "$NM_FAIL" -eq 0 ] && ok "核心原生模块全部可加载" || bad "$NM_FAIL 个核心原生模块加载失败"
 
 echo
-echo "[3/9] 预装插件版本（对比安装包清单）"
-if [ -f "$DEST/seed-profile.sh" ]; then
-  BUNDLES="$(grep -m1 '^BUNDLES=' "$DEST/seed-profile.sh" | sed -E 's/^BUNDLES="//; s/"$//')"
-  if [ -z "$BUNDLES" ]; then
-    skip "seed-profile.sh 里没有 BUNDLES 清单"
+echo "[3/9] 预装插件版本（对比清单）"
+if [ -f "$DEST/manifest.json" ]; then
+  LIST="$("$NODE_BIN" -e '
+    const fs=require("node:fs")
+    const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))
+    for(const c of m.components) if(c.kind==="plugin") console.log(`${c.name}\t${c.version}`)
+  ' "$DEST/manifest.json" 2>/dev/null)"
+  if [ -z "$LIST" ]; then
+    skip "清单里没有插件组件"
   else
-    MISMATCH=0
-    for item in $BUNDLES; do
-      name="${item%@*}"; want="${item##*@}"
-      got="$("$NODE_BIN" -p "require('$(modpath "$name")/package.json').version" 2>/dev/null || true)"
+    MISMATCH=0; TOTAL=0
+    while IFS="	" read -r name want; do
+      [ -n "$name" ] || continue
+      TOTAL=$((TOTAL + 1))
+      GOT_FILE="$DEST/plugins/$name/component.json"
+      if [ -f "$GOT_FILE" ]; then
+        got="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$GOT_FILE" | head -1)"
+      else
+        got=""
+      fi
       if [ -z "$got" ]; then
         echo "      MISS $name（未安装，期望 $want）"; MISMATCH=$((MISMATCH + 1))
       elif [ "$got" = "$want" ]; then
@@ -100,22 +108,13 @@ if [ -f "$DEST/seed-profile.sh" ]; then
       else
         echo "      DIFF $name 期望 $want，实际 $got"; MISMATCH=$((MISMATCH + 1))
       fi
-    done
-    [ "$MISMATCH" -eq 0 ] && ok "12 个预装插件版本与清单一致" || warn "$MISMATCH 个插件与清单不一致"
-    echo "      插件单元: $PLUGIN_ROOT"
-    if [ -f "$DEST/plugins/.installed-version" ]; then
-      PLUG_VER="$(grep -o '"version": *"[^"]*"' "$DEST/plugins/.installed-version" 2>/dev/null | head -1 | cut -d'"' -f4)"
-      ok "插件单元版本: ${PLUG_VER:-未知}"
-    elif [ "$PLUGIN_ROOT" = "$DEST/app" ]; then
-      warn "插件混在本体树里（旧布局；新包会把插件装到 $DEST/plugins）"
-    fi
+    done <<< "$LIST"
+    [ "$MISMATCH" -eq 0 ] && ok "$TOTAL 个预装插件版本与清单一致" || warn "$MISMATCH 个插件与清单不一致"
+    echo "      插件目录: $DEST/plugins"
   fi
 else
-  skip "找不到 $DEST/seed-profile.sh"
+  skip "缺少 $DEST/manifest.json（安装时未随包留存清单）"
 fi
-
-echo
-echo "[4/9] 浏览器"
 SYS_BROWSER=""
 for candidate in /usr/share/browser/browser /usr/bin/browser; do
   [ -x "$candidate" ] && { SYS_BROWSER="$candidate"; break; }
@@ -126,18 +125,21 @@ if [ -n "$SYS_BROWSER" ]; then
 else
   warn "没找到系统浏览器（/usr/share/browser/browser）"
 fi
+# 组件分发不再携带浏览器 deb：只要求"MCP 能拉起一个可执行的系统浏览器"。
 if [ -x /usr/bin/browser360ent-cn-stable ]; then
-  ok "拉起用浏览器 360: $(/usr/bin/browser360ent-cn-stable --version 2>/dev/null | tail -1)"
+  ok "可用浏览器 360: $(/usr/bin/browser360ent-cn-stable --version 2>/dev/null | tail -1)"
 else
-  warn "没找到 360 企业浏览器（/usr/bin/browser360ent-cn-stable）"
+  echo "      （没有 360；按系统浏览器方案继续）"
 fi
-CHROME_EXPORT="$(grep -o 'DSH_CHROME_PATH="[^"]*"' "$DEST/start-web.sh" 2>/dev/null | head -1)"
+CHROME_EXPORT="$(grep -o 'DSH_CHROME_PATH="${DSH_CHROME_PATH:-[^}]*}"' "$DEST/start-web.sh" 2>/dev/null | head -1)"
 if [ -n "$CHROME_EXPORT" ]; then
-  echo "      start-web.sh: $CHROME_EXPORT"
-  case "$CHROME_EXPORT" in
-    *browser360ent*) ok "MCP/univer 使用 360（Chrome 108）";;
-    *) warn "MCP/univer 未指向 360，实际: $CHROME_EXPORT";;
-  esac
+  CHROME_BIN="$(printf '%s' "$CHROME_EXPORT" | sed -E 's/.*:-([^}]*)}.*/\1/')"
+  echo "      start-web.sh 默认浏览器: $CHROME_BIN"
+  if [ -x "$CHROME_BIN" ]; then
+    ok "MCP/univer 将使用系统浏览器: $CHROME_BIN"
+  else
+    warn "start-web.sh 指向的浏览器不可执行: $CHROME_BIN（MCP/浏览器类插件不可用）"
+  fi
 else
   warn "start-web.sh 里没有 DSH_CHROME_PATH 导出"
 fi
@@ -199,7 +201,7 @@ if [ -f "$PATCH" ]; then
   fi
   # 孤儿判定：entry 多数来自各 bundle 的 cordis.patch.yml（webserver/univer/dream-skin
   # 都不在 profile 的 cordis.yml 文本里），必须把 bundle patch 的 id 一并算作已知。
-  KNOWN="$(find "$DEST/app/node_modules" "$PLUGIN_ROOT/node_modules" -maxdepth 3 -name 'cordis.patch.yml' -exec grep -hoE '^\s*-\s*id:\s*\S+' {} + 2>/dev/null | sed -E 's/^\s*-\s*id:\s*//' | sort -u)"
+  KNOWN="$(find "$DEST/app/node_modules" "$DEST/plugins" -maxdepth 6 -name 'cordis.patch.yml' -exec grep -hoE '^\s*-\s*id:\s*\S+' {} + 2>/dev/null | sed -E 's/^\s*-\s*id:\s*//' | sort -u)"
   KNOWN="$KNOWN$(printf '\n%s' "$(grep -oE '^\s*-\s*id:\s*\S+' "$PROFILE_HOME/cordis.yml" 2>/dev/null | sed -E 's/^\s*-\s*id:\s*//')")"
   if [ -z "$KNOWN" ]; then
     skip "无法枚举已知 entry，跳过孤儿行检查"

@@ -9,7 +9,7 @@
 #   package/payload/scripts/    seed-profile.sh 等随装脚本（installer 也在其中）
 #   package/payload/desktop/    （可选）Electron 壳：app/ + electron-v*.zip
 #   package/payload/tools/      （可选）pnpm / glibc 兼容运行时
-#   package/payload/browser/    （可选）系统浏览器升级 deb
+#   （浏览器 deb 不再随包携带：界面用 Electron，MCP 用系统浏览器探测）
 #
 # 装到 $DSH_DEST：app/ node/ 脚本。**不碰 $DSH_DEST/plugins**（插件是独立组件）。
 #
@@ -39,7 +39,7 @@ if [ -z "$COMPONENT" ] || [ ! -f "$COMPONENT" ]; then
   exit 1
 fi
 COMPONENT="$(cd "$(dirname "$COMPONENT")" && pwd)/$(basename "$COMPONENT")"
-if [ "$UPGRADE" = "1" ]; then export DSH_BROWSER_UPGRADE="${DSH_BROWSER_UPGRADE:-n}"; fi
+
 
 STAGE="$DEST/.install-stage"
 rm -rf "$STAGE"
@@ -163,50 +163,24 @@ fi
 [ -f "$DEST/seed-profile.sh" ] || { echo "[错误] 组件包缺 seed-profile.sh" >&2; exit 1; }
 
 # ---------- 4. 系统浏览器 ----------
+# 界面是 Electron 壳；MCP / 需要浏览器的插件仍用系统浏览器。这里只探测，不携带
+# 也不升级浏览器 deb（离线分发不再包含浏览器载荷）。
 echo "[4/6] 浏览器检测 ..."
-BROWSER_DEB_DIR="$PAYLOAD/browser"
-DEEPIN_VER="$(dpkg-query -W -f='${Version}' org.deepin.browser 2>/dev/null || true)"
-BROWSER_DEB=""
-if [ -d "$BROWSER_DEB_DIR" ]; then
-  BROWSER_DEB="$(ls "$BROWSER_DEB_DIR"/org.deepin.browser_*_amd64.deb 2>/dev/null | head -1)"
-fi
-if [ -z "$BROWSER_DEB" ]; then
-  echo "      系统浏览器 org.deepin.browser: ${DEEPIN_VER:-未安装}（包内未携带升级 deb）"
-else
-  NEW_VER="$(dpkg-deb -f "$BROWSER_DEB" Version 2>/dev/null || true)"
-  echo "      系统浏览器 org.deepin.browser: ${DEEPIN_VER:-未安装} / 包内: ${NEW_VER:-读取失败}"
-  if [ -z "$DEEPIN_VER" ]; then
-    echo "      系统未安装该浏览器，不自动新装"
-  elif ! dpkg --compare-versions "$DEEPIN_VER" lt "$NEW_VER" 2>/dev/null; then
-    echo "      系统浏览器版本不低于包内版本，无需升级"
-  elif [ -n "${DSH_BROWSER_UPGRADE:-}" ]; then
-    case "$DSH_BROWSER_UPGRADE" in
-      y|Y|yes|YES)
-        if dpkg -i "$BROWSER_DEB"; then echo "      浏览器已升级到 $NEW_VER"
-        else echo "      [警告] 升级失败；可手动: sudo dpkg -i $BROWSER_DEB"; fi ;;
-      *) echo "      已跳过浏览器升级（DSH_BROWSER_UPGRADE=$DSH_BROWSER_UPGRADE）" ;;
-    esac
-  elif [ "$(id -u)" != "0" ] || [ ! -e /dev/tty ]; then
-    echo "      非 root 或没有终端，跳过；可手动: sudo dpkg -i $BROWSER_DEB"
-  else
-    printf "      检测到系统浏览器 %s 低于包内 %s。是否升级？[y/N] " "$DEEPIN_VER" "$NEW_VER"
-    read -r BROWSER_UPGRADE_ANS < /dev/tty 2>/dev/null || BROWSER_UPGRADE_ANS=""
-    case "$BROWSER_UPGRADE_ANS" in
-      y|Y|yes|YES) dpkg -i "$BROWSER_DEB" && echo "      浏览器已升级到 $NEW_VER" || echo "      [警告] 升级失败" ;;
-      *) echo "      已跳过浏览器升级" ;;
-    esac
-  fi
-fi
 
 if [ -n "${DSH_CHROME_PATH:-}" ]; then
   CHROME_BIN="$DSH_CHROME_PATH"
 else
   CHROME_BIN=""
-  for candidate in /usr/bin/browser360ent-cn-stable /usr/bin/browser /usr/bin/chromium /usr/bin/google-chrome; do
+  for candidate in /usr/bin/browser /usr/bin/browser360ent-cn-stable /usr/bin/chromium /usr/bin/google-chrome; do
     if [ -x "$candidate" ]; then CHROME_BIN="$candidate"; break; fi
   done
 fi
-[ -n "$CHROME_BIN" ] || CHROME_BIN="${DSH_CHROME_PATH:-/usr/bin/browser}"
+if [ -n "$CHROME_BIN" ]; then
+  echo "      系统浏览器: $CHROME_BIN"
+else
+  echo "      [警告] 未找到可用的系统浏览器；MCP / 浏览器类插件将不可用（安装继续）"
+  CHROME_BIN="/usr/bin/browser"
+fi
 CHROME_HOME="/var/tmp/dsh-chrome-home"
 mkdir -p "$CHROME_HOME"
 chmod 1777 "$CHROME_HOME" 2>/dev/null || true

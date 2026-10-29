@@ -12,6 +12,7 @@
 # 校验 sha256 → 按 order 依次调用各组件的安装脚本 → 记录状态 → 重播 profile。
 #
 # 用法：
+#   sudo ./installer.sh apply                    自动判定：全新安装或升级（离线介质入口）
 #   sudo ./installer.sh install all              全新安装（本体 + 全部插件）
 #   sudo ./installer.sh install body             只装本体
 #   sudo ./installer.sh install dsh-better-sidebar 只装一个插件
@@ -26,6 +27,7 @@
 # 选项：
 #   --dist DIR         分发目录（默认本脚本所在目录）
 #   --server URL       在线模式：清单和组件从 URL 前缀下载（磁盘上是离线模式）
+#   --dry-run          只打印计划，不改动磁盘
 #   --yes              非交互
 #   --no-seed          不重播 profile（调试用）
 #
@@ -43,6 +45,8 @@ SERVER=""
 ASSUME_YES=0
 DO_SEED=1
 JSON=0
+DRY_RUN=0
+LOCK_HELD=0
 COMMAND=""
 ARGS=()
 ORIGINAL_ARGS=("$@")
@@ -54,6 +58,7 @@ while [ $# -gt 0 ]; do
     --yes|-y) ASSUME_YES=1; shift ;;
     --no-seed) DO_SEED=0; shift ;;
     --json) JSON=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
     --help|-h)
       sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -70,8 +75,10 @@ fail() { echo "ERROR $*" >&2; exit 1; }
 # 写安装目录/清单缓存需要 root。调用方不必自己加 sudo：需要时这里直接用 sudo
 # 重新执行自己（免密优先，其次交互式提示）。只读命令（list/status/verify）不提权。
 needs_root_command() {
+  # --dry-run 只读计划，不提权。
+  [ "$DRY_RUN" = "1" ] && return 1
   case "$COMMAND" in
-    install|upgrade|remove|seed) return 0 ;;
+    install|upgrade|apply|remove|seed) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -80,7 +87,7 @@ if [ "$(id -u)" != "0" ] && needs_root_command; then
     fail "需要 root 权限，且系统没有 sudo；请以 root 运行"
   fi
   env_args=()
-  for name in DSH_DEST DSH_NODE_DIR DSH_GLIBC_DIR DSH_ELECTRON_DIR DSH_DESKTOP DSH_BROWSER_UPGRADE DSH_UPDATE_URL DSH_USER; do
+  for name in DSH_DEST DSH_NODE_DIR DSH_GLIBC_DIR DSH_ELECTRON_DIR DSH_DESKTOP DSH_HOME DSH_USER; do
     value="$(eval "printf '%s' \"\${$name:-}\"")"
     [ -n "$value" ] && env_args+=("$name=$value")
   done
@@ -94,6 +101,23 @@ need_root() {
   if [ "$(id -u)" != "0" ]; then
     fail "该操作需要 root（自动提权失败）：请手动 sudo ./installer.sh $COMMAND ..."
   fi
+}
+
+# ---------- 并发锁 ----------
+# 桌面壳的"从离线包升级"和运维手工执行可能同时发生；两个 apply 并发会互相踩目录。
+LOCK_FILE="$DEST/.installer.lock"
+acquire_lock() {
+  [ "$DRY_RUN" = "1" ] && return 0
+  [ "$LOCK_HELD" = "1" ] && return 0
+  if ! command -v flock >/dev/null 2>&1; then
+    log "[警告] 系统没有 flock，跳过并发锁"
+    return 0
+  fi
+  mkdir -p "$DEST" 2>/dev/null || true
+  eval "exec 9>\"$LOCK_FILE\""
+  flock -n 9 || fail "另一个安装/升级进程正在运行（锁 $LOCK_FILE）"
+  LOCK_HELD=1
+  log "已获取安装锁"
 }
 
 # ---------- 分发目录自动探查 ----------
@@ -200,10 +224,32 @@ console.log(rows.join('\n'))
 JSEOF
 )"
   else
-    local row=""
-    [ -f "$DEST/.installed-version" ] && row="$("$INSTALL_NODE_DIR/bin/node" -p "JSON.parse(require('node:fs').readFileSync('$DEST/.installed-version','utf8')).version" 2>/dev/null || true)"
-    INSTALLED_SCAN=""
-    [ -n "$row" ] && INSTALLED_SCAN="@deepseek-ai/dsh	body	$row"
+    INSTALLED_SCAN="$(python3 - "$DEST" <<'PYEOF'
+import json, os, sys
+dest = sys.argv[1]
+rows = []
+def read_version(path):
+    try:
+        return json.load(open(path)).get('version')
+    except Exception:
+        return None
+body = read_version(os.path.join(dest, '.installed-version'))
+if body:
+    rows.append('@deepseek-ai/dsh\tbody\t' + str(body))
+for dirpath, dirnames, filenames in os.walk(os.path.join(dest, 'plugins')):
+    if 'component.json' not in filenames:
+        continue
+    try:
+        meta = json.load(open(os.path.join(dirpath, 'component.json')))
+    except Exception:
+        continue
+    name = meta.get('name') or os.path.basename(dirpath)
+    version = meta.get('version') or read_version(os.path.join(dirpath, '.installed-version'))
+    if version:
+        rows.append(str(name) + '\tplugin\t' + str(version))
+print('\n'.join(rows))
+PYEOF
+)"
   fi
   printf '%s\n' "$INSTALLED_SCAN"
 }
@@ -256,18 +302,43 @@ fs.writeFileSync(file, JSON.stringify(state, null, 2) + '\n')
 JSEOF
 }
 
-component_field() { # component_field <index> <field>
-  "$NODE_BIN" -e '
-    const fs=require("node:fs")
-    const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))
-    const c=m.components[Number(process.argv[2])]
-    const value=c?.[process.argv[3]]
-    if(Array.isArray(value)) console.log(value.join(",")); else if(value!==undefined) console.log(String(value))
-  ' "$MANIFEST" "$1" "$2"
+# 清单读取：有 node 用 node；全新安装时本机还没有 node（本体组件尚未解包），退到 python3。
+json_query() { # json_query <file> count | field <index> <name> | version
+  local file="$1" op="$2"
+  shift 2
+  if [ -n "$NODE_BIN" ]; then
+    case "$op" in
+      count)
+        "$NODE_BIN" -e 'const fs=require("node:fs");console.log(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).components.length)' "$file" ;;
+      field)
+        "$NODE_BIN" -e '
+          const fs=require("node:fs")
+          const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))
+          const c=m.components[Number(process.argv[2])]
+          const value=c?.[process.argv[3]]
+          if(Array.isArray(value)) console.log(value.join(",")); else if(value!==undefined) console.log(String(value))
+        ' "$file" "$1" "$2" ;;
+      *)
+        "$NODE_BIN" -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));console.log(m[process.argv[2]] ?? "")' "$file" "$op" ;;
+    esac
+    return 0
+  fi
+  python3 - "$file" "$op" "$@" <<'PYEOF'
+import json, sys
+file, op, *args = sys.argv[1:]
+data = json.load(open(file))
+if op == 'count':
+    print(len(data.get('components', [])))
+elif op == 'field':
+    comp = data['components'][int(args[0])]
+    value = comp.get(args[1])
+    print(','.join(str(v) for v in value) if isinstance(value, list) else ('' if value is None else value))
+else:
+    print(data.get(op, ''))
+PYEOF
 }
-component_count() {
-  "$NODE_BIN" -e 'const fs=require("node:fs");console.log(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).components.length)' "$MANIFEST"
-}
+component_field() { json_query "$MANIFEST" field "$1" "$2"; }
+component_count() { json_query "$MANIFEST" count; }
 
 resolve_component_file() { # resolve_component_file <manifest-relative-file>
   if [ -f "$WORK/$1" ]; then printf '%s' "$WORK/$1"; return 0; fi
@@ -324,8 +395,14 @@ install_component() { # install_component <index> [upgrade]
   local args=("--component" "$comp")
   [ "$mode" = "upgrade" ] && args+=("--upgrade")
   # 每个组件的安装脚本自己会动 $DEST；插件安装包不带 profile 播种（统一由 installer 做）。
-  if ! DSH_DEST="$DEST" DSH_NODE_DIR="$INSTALL_NODE_DIR" DSH_SKIP_SEED=1 DSH_USER="${DSH_USER:-${SUDO_USER:-}}" \
-      bash "$stage/package/install.sh" "${args[@]}"; then
+  # 路径类变量按需透传，支持沙箱 DEST 与自定义 electron/glibc 目录。
+  local comp_env=(DSH_DEST="$DEST" DSH_NODE_DIR="$INSTALL_NODE_DIR" DSH_SKIP_SEED=1 DSH_USER="${DSH_USER:-${SUDO_USER:-}}")
+  local pass_name pass_value
+  for pass_name in DSH_ELECTRON_DIR DSH_GLIBC_DIR DSH_CHROME_PATH DSH_DESKTOP; do
+    pass_value="$(eval "printf '%s' \"\${$pass_name:-}\"")"
+    [ -n "$pass_value" ] && comp_env+=("$pass_name=$pass_value")
+  done
+  if ! env "${comp_env[@]}" bash "$stage/package/install.sh" "${args[@]}"; then
     rm -rf "$stage"
     echo "ERROR $name 安装失败"
     return 1
@@ -343,22 +420,39 @@ seed_profile() {
   local seed_node="$INSTALL_NODE_DIR/bin/node"
   [ -x "$seed_node" ] || seed_node="$DEST/node/bin/node"
   echo "PHASE 重播 profile"
-  if [ "$(id -u)" = "0" ] && [ -n "$target_user" ] && [ "$target_user" != "root" ]; then
+  # DSH_HOME 显式指定时用它（沙箱测试 / 自定义部署）；否则用目标用户的家目录。
+  local seed_home="${DSH_HOME:-}"
+  if [ -z "$seed_home" ] && [ -n "$target_user" ] && [ "$target_user" != "root" ]; then
     local home
     home="$(getent passwd "$target_user" | cut -d: -f6)"
-    if [ -n "$home" ] && [ -d "$home" ]; then
-      install -d -m 700 -o "$target_user" "$home/.dsh" 2>/dev/null || true
-      if sudo -u "$target_user" -H env DSH_HOME="$home/.dsh" SEED_NODE="$seed_node" \
-          bash "$DEST/seed-profile.sh" "$DEST"; then
-        echo "RESULT ok profile seeded"
-        return 0
-      fi
-      echo "ERROR profile 播种失败（用户 $target_user）"
-      return 1
+    [ -n "$home" ] && [ -d "$home" ] && seed_home="$home/.dsh"
+  fi
+  if [ -n "$seed_home" ] && [ "$(id -u)" = "0" ] && [ -n "$target_user" ] && [ "$target_user" != "root" ]; then
+    mkdir -p "$seed_home"
+    chown "$target_user":"$(id -gn "$target_user" 2>/dev/null || echo "$target_user")" "$seed_home" 2>/dev/null || true
+    if sudo -u "$target_user" -H env DSH_HOME="$seed_home" SEED_NODE="$seed_node" \
+        bash "$DEST/seed-profile.sh" "$DEST"; then
+      echo "RESULT ok profile seeded"
+      return 0
     fi
+    echo "ERROR profile 播种失败（用户 $target_user）"
+    return 1
+  fi
+  if [ -n "$seed_home" ]; then
+    env DSH_HOME="$seed_home" SEED_NODE="$seed_node" bash "$DEST/seed-profile.sh" "$DEST" || { echo "ERROR profile 播种失败"; return 1; }
+    echo "RESULT ok profile seeded"
+    return 0
   fi
   SEED_NODE="$seed_node" bash "$DEST/seed-profile.sh" "$DEST" || { echo "ERROR profile 播种失败"; return 1; }
   echo "RESULT ok profile seeded"
+}
+
+# 清单留存：装完后把 $WORK/manifest.json 复制到 $DEST，之后的 status/verify 不再依赖介质。
+persist_manifest() {
+  [ -f "$WORK/manifest.json" ] || return 0
+  mkdir -p "$DEST"
+  cp -f "$WORK/manifest.json" "$DEST/manifest.json" 2>/dev/null || true
+  chmod 644 "$DEST/manifest.json" 2>/dev/null || true
 }
 
 # ---------- 命令 ----------
@@ -416,8 +510,53 @@ JSEOF
   cmd_list
 }
 
+# ---------- 计划 ----------
+print_plan() {
+  local targets=("${ARGS[@]}")
+  [ "${#targets[@]}" -eq 0 ] && targets=("all")
+  local count i=0 target
+  count="$(component_count)"
+  echo "PHASE 计划"
+  while [ "$i" -lt "$count" ]; do
+    local name kind version current action wanted=0
+    name="$(component_field "$i" name)"
+    kind="$(component_field "$i" kind)"
+    version="$(component_field "$i" version)"
+    for target in "${targets[@]}"; do
+      [ "$target" = "all" ] && wanted=1
+      [ "$target" = "$name" ] && wanted=1
+      [ "$target" = "body" ] && [ "$kind" = "body" ] && wanted=1
+    done
+    if [ "$wanted" = "1" ]; then
+      current="$(installed_version_of "$name" "$kind" || true)"
+      if [ -z "$current" ]; then action="安装"
+      elif [ "$current" = "$version" ]; then action="跳过（已是最新）"
+      else action="升级 $current -> $version"; fi
+      printf '  %-44s %-6s %s\n' "$name" "$kind" "$action"
+    fi
+    i=$((i + 1))
+  done
+}
+
+# apply：自动判定全新安装或升级（离线介质入口 install.sh 调它）。
+cmd_apply() {
+  print_plan
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "RESULT plan-only"
+    return 0
+  fi
+  need_root
+  acquire_lock
+  if [ -f "$DEST/app/node_modules/@deepseek-ai/dsh/package.json" ]; then
+    cmd_upgrade
+  else
+    cmd_install
+  fi
+}
+
 cmd_install() {
   need_root
+  acquire_lock
   local count i targets=("${ARGS[@]}")
   count="$(component_count)"
   if [ "${#targets[@]}" -eq 0 ]; then targets=("all"); fi
@@ -452,11 +591,13 @@ cmd_install() {
   done
   seed_profile || failed=$((failed + 1))
   [ "$failed" -eq 0 ] || { echo "ERROR 有 $failed 个步骤失败"; return 1; }
+  persist_manifest
   echo "RESULT done"
 }
 
 cmd_upgrade() {
   need_root
+  acquire_lock
   local count i targets=("${ARGS[@]}")
   count="$(component_count)"
   [ "${#targets[@]}" -eq 0 ] && targets=("all")
@@ -478,11 +619,13 @@ cmd_upgrade() {
   done
   seed_profile || failed=$((failed + 1))
   [ "$failed" -eq 0 ] || { echo "ERROR 有 $failed 个组件升级失败"; return 1; }
+  persist_manifest
   echo "RESULT done"
 }
 
 cmd_remove() {
   need_root
+  acquire_lock
   [ "${#ARGS[@]}" -gt 0 ] || fail "用法: installer.sh remove <插件名>..."
   local failed=0
   for name in "${ARGS[@]}"; do
@@ -522,6 +665,7 @@ cmd_remove() {
 
 cmd_seed() {
   need_root
+  acquire_lock
   seed_profile
 }
 
@@ -563,6 +707,7 @@ case "$COMMAND" in
   status) cmd_status ;;
   install) cmd_install ;;
   upgrade) cmd_upgrade ;;
+  apply) cmd_apply ;;
   remove) cmd_remove ;;
   seed) cmd_seed ;;
   verify) cmd_verify ;;

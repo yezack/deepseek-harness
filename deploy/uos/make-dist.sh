@@ -184,6 +184,54 @@ console.log(`  清单: ${components.length} 个组件（本体 1 + 插件 ${inde
 JSEOF
 rm -rf "$STAGE"
 
+# ---------- 介质自检清单 + 离线安装入口 ----------
+# 离线交付是"整目录拷介质"：先校验完整性再安装，防止 U 盘/共享目录拷贝损坏。
+echo "=== 3b. 介质清单与安装入口 ==="
+"$BUILD/node/bin/node" - "$DIST" <<'JSEOF'
+const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto')
+const dist = process.argv[2]
+const sha = (file) => {
+  const hash = crypto.createHash('sha256')
+  const fd = fs.openSync(file, 'r')
+  const buffer = Buffer.alloc(1 << 20)
+  let read
+  while ((read = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, read))
+  fs.closeSync(fd)
+  return hash.digest('hex')
+}
+const files = fs.readdirSync(path.join(dist, 'components'))
+  .filter((file) => file.endsWith('.tar.gz'))
+  .sort()
+  .map((file) => `components/${file}`)
+files.push('manifest.json', 'VERSION')
+fs.writeFileSync(path.join(dist, 'SHA256SUMS'), files.map((rel) => `${sha(path.join(dist, rel))}  ${rel}`).join('\n') + '\n')
+console.log(`  SHA256SUMS: ${files.length} 项`)
+JSEOF
+cat > "$DIST/install.sh" <<'WRAPPER'
+#!/bin/bash
+# 离线介质安装入口：先校验介质完整性（SHA256SUMS），再交给 installer 执行。
+#
+# 用法（在介质目录里）：
+#   sudo ./install.sh              全新安装或升级（由 installer apply 自动判定）
+#   sudo ./install.sh --dry-run    只打印计划
+#   sudo ./install.sh --yes        非交互
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE" || { echo "ERROR 无法进入介质目录 $HERE" >&2; exit 1; }
+[ -f SHA256SUMS ] || { echo "ERROR 缺少 SHA256SUMS（介质不完整）" >&2; exit 1; }
+[ -f installer.sh ] || { echo "ERROR 缺少 installer.sh（介质不完整）" >&2; exit 1; }
+echo "PHASE 介质自检"
+# 用 --quiet：只输出失败项（中文 locale 下 "成功" 不是 "OK"，不能用 grep 过滤）。
+if ! CHECK_OUT="$(sha256sum --quiet -c SHA256SUMS 2>&1)"; then
+  echo "ERROR 介质校验失败：拷贝可能损坏，请重新复制介质" >&2
+  printf '%s\n' "$CHECK_OUT" | head -5 >&2
+  exit 1
+fi
+echo "RESULT ok medium-verified"
+exec bash "$HERE/installer.sh" apply --dist "$HERE" "$@"
+WRAPPER
+chmod 755 "$DIST/install.sh"
+
 echo "=== 4. 结果 ==="
 ls -lh "$DIST" | head -10
 ls -lh "$DIST/components" | head -20
