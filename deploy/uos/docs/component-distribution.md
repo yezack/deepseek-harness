@@ -227,3 +227,17 @@ installer 直接 `ERROR` 并提示用新介质重装（不做自动迁移）。
   - `scripts` = 脚本内容哈希（前 12 位），只改脚本时不重下本体；
   - 插件 = 包自身 semver。
 
+
+## 11. 验收记录
+
+2026-10-30 在 UOS 测试机（suma）完成一轮完整验收，基线包 20261029.0500：
+
+| 用例 | 结果 |
+|---|---|
+| 空 DEST 全新安装（17 组件，沙箱路径） | rc=0、generation 2、status 全部已安装、verify ok、doctor PASS 22 / WARN 4 / FAIL 0 |
+| 增量升级 0500→0510 | core/tools/shell 升级、scripts 按内容哈希跳过、13 插件跳过；generation 3、pp.bak-2 保留 |
+| installer rollback 2 | estored=1、generation 回到 2、.installed-version 回到 0500 |
+| 失败注入（body 已升级后 dshmarket sha 不符） | rc=1、回滚本次事务 → 恢复 2 个组件、generation 不变、无残留 .bak-* |
+| 介质篡改（组件包追加 1 字节） | install.sh 介质自检失败并拒绝安装 |
+| requires 冲突（插件要求 dsh 0.3.0） | 写盘前报错、generation 不变 |
+| 正式安装（/deepseek-harness，基线包） | 17 组件已安装、generation 10、页面 200/150460B、ga=1、dshmarket=0、doctor PASS 23 / WARN 3 / FAIL 0 |
